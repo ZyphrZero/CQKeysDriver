@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 from ctypes import CDLL
+import time
 
-
-dll_path = 'D:\\gitRepo\\kmclassdll\\x64\\Debug\\kmclassdll.dll'
-driver_path = b'D:\\gitRepo\\kmclass\\x64\\Debug\\kmclass.sys'
+dll_path = 'E:\\GitHub\\KMDLL\\dll\\kmclassdll.dll'
+driver_path = b'E:\\GitHub\\KMDLL\\dll\\kmclass.sys'
 
 
 driver = None
@@ -158,12 +158,14 @@ VK_CODE = {
 
 
 def _key_up(key): 
-    global driver
-    driver.KeyDown(VK_CODE[key])
-
-def _key_down(key):
+    """按键释放"""
     global driver
     driver.KeyUp(VK_CODE[key])
+
+def _key_down(key):
+    """按键按下"""
+    global driver
+    driver.KeyDown(VK_CODE[key])
 
 def _left_button_down():
     global driver
@@ -197,54 +199,224 @@ def _move_to(x, y):
     global driver
     driver.MouseMoveABSOLUTE(x,y)
 
+def _mouse_xbutton1_down():
+    """鼠标前侧键(X1)按下"""
+    global driver
+    driver.MouseXButton1Down()
+
+def _mouse_xbutton1_up():
+    """鼠标前侧键(X1)释放"""
+    global driver
+    driver.MouseXButton1Up()
+
+def _mouse_xbutton2_down():
+    """鼠标后侧键(X2)按下"""
+    global driver
+    driver.MouseXButton2Down()
+
+def _mouse_xbutton2_up():
+    """鼠标后侧键(X2)释放"""
+    global driver
+    driver.MouseXButton2Up()
+
+# 加载驱动
 def load_driver():
     global driver
     try:
+        print("开始加载驱动...")
         # 先加载 DLL
+        print(f"正在加载DLL: {dll_path}")
         driver = CDLL(dll_path)
         
         # 先尝试卸载，如果服务不存在也不报错
+        print("尝试卸载已存在的驱动服务...")
         try:
             unload_driver()
-        except:
-            pass
+        except Exception as e:
+            print(f"卸载旧驱动时出现异常(可以忽略): {e}")
         
         # 重新加载驱动
+        print(f"正在加载驱动文件: {driver_path}")
         result = driver.LoadNTDriver('kmclass', driver_path)
         if result == 0:
+            print("驱动加载失败，错误码:", result)
             raise RuntimeError("驱动加载失败")
+        else:
+            print("驱动加载成功")
             
         # 等待一小段时间确保服务创建完成
+        print("等待服务启动...")
         time.sleep(1)
         
         # 设置句柄
+        print("正在设置驱动句柄...")
         handle_result = driver.SetHandle()
         if handle_result == 0:
+            print("设置句柄失败，错误码:", handle_result)
             raise RuntimeError("设置句柄失败")
+        print("驱动初始化完成")
             
     except Exception as e:
-        print(f"加载驱动失败: {e}")
+        print(f"加载驱动失败: {str(e)}")
         # 确保清理
         if driver is not None:
+            print("正在清理...")
             unload_driver()
         raise
+
+# 测试键盘功能
+def test_keyboard():
+    """测试键盘功能"""
+    print("\n=== 开始单键测试 ===")
+    
+    # 测试单个按键
+    print("测试按下字母'A'键和'B'键...")
+    _key_down('a')
+    time.sleep(1)
+    _key_up('a')
+    time.sleep(1)
+    _key_down('b')
+    time.sleep(1)
+    _key_up('b')
+
+    # 测试功能键
+    print("测试F5键...")
+    _key_down('F5')
+    time.sleep(1)
+    _key_up('F5')
+    
+    print("单键功能测试完成")
+
+def test_copy_operation():
+    """测试复制操作 Ctrl+A -> Ctrl+C -> Ctrl+V"""
+    print("\n=== 开始测试组合键复制操作 ===")
+    
+    # Ctrl+A 全选
+    print("执行 Ctrl+A 全选...")
+    _key_down('ctrl')
+    _key_down('a')
+    print("按下Ctrl+A")
+    time.sleep(0.1)
+    _key_up('a')
+    _key_up('ctrl')
+    print("释放Ctrl+A")
+    time.sleep(0.5)  # 等待全选完成
+    
+    # Ctrl+C 复制
+    print("执行 Ctrl+C 复制...")
+    _key_down('ctrl')
+    _key_down('c')
+    print("按下Ctrl+C")
+    time.sleep(0.1)
+    _key_up('c')
+    _key_up('ctrl')
+    print("释放Ctrl+C")
+    time.sleep(0.5)  # 等待复制完成
+    print("----复制完成----")
+    
+    # Ctrl+V 粘贴
+    print("执行 Ctrl+V 粘贴...")
+    _key_down('ctrl')
+    _key_down('v')
+    print("按下Ctrl+V")
+    time.sleep(0.1)
+    _key_up('v')
+    _key_up('ctrl')
+    print("释放Ctrl+V")
+    print("----第一次粘贴完成----")
+    
+    # 再次粘贴
+    print("执行 Ctrl+V 粘贴...")
+    _key_down('ctrl')
+    _key_down('v')
+    print("按下Ctrl+V")
+    time.sleep(0.1)
+    _key_up('v')
+    _key_up('ctrl')
+    print("释放Ctrl+V")
+    print("----第二次粘贴完成----")
+    
+def test_mouse():
+    """测试鼠标功能"""
+    print("\n=== 开始鼠标测试 ===")
+    
+    # 测试鼠标移动
+    print("测试鼠标相对移动...")
+    _move_rel(100, 0)  # 向右移动100像素
+    time.sleep(1)
+    _move_rel(0, 100)  # 向下移动100像素
+    time.sleep(1)
+    
+    # 测试鼠标按键
+    print("测试左键点击...")
+    _left_button_down()
+    time.sleep(1)
+    _left_button_up()
+    
+    print("测试右键点击...")
+    _right_button_down()
+    time.sleep(1)
+    _right_button_up()
+    
+    print("测试中键点击...")
+    _middle_button_down()
+    time.sleep(1)
+    _middle_button_up()
+    
+    print("测试鼠标前侧键(X1)...")
+    _mouse_xbutton1_down()
+    time.sleep(1)
+    _mouse_xbutton1_up()
+    
+    print("测试鼠标后侧键(X2)...")
+    _mouse_xbutton2_down()
+    time.sleep(1)
+    _mouse_xbutton2_up()
+    
+    # 测试绝对位置移动
+    print("测试鼠标移动到屏幕中心...")
+    _move_to(500, 500)  # 移动到屏幕中心附近
+    
+    print("鼠标测试完成")
+
+
+def run_all_tests():
+    """运行所有测试"""
+    try:
+
+        print("开始加载驱动并运行测试...")
+        load_driver()
+        print("驱动加载完成，3s后开始测试...")
+        time.sleep(3)
+        # 测试单键
+        test_keyboard()
+        time.sleep(1)
+        
+        # 测试组合键复制粘贴
+        test_copy_operation()
+        time.sleep(1)
+        
+        # 测试鼠标
+        test_mouse()
+        time.sleep(1)
+        print("\n所有测试完成!")
+        
+    except Exception as e:
+        print(f"测试过程中出现错误: {str(e)}")
+    finally:
+        print("正在清理...")
+        unload_driver()
 
 def unload_driver():
     global driver
     if driver is not None:
         try:
-            driver.UnloadNTDriver('kmclass')
-        except:
-            pass
+            print("正在卸载驱动服务...")
+            result = driver.UnloadNTDriver('kmclass')
+            print(f"驱动卸载{'成功' if result != 0 else '失败'}")
+        except Exception as e:
+            print(f"卸载驱动时出现异常: {e}")
 
 
 if __name__ == '__main__' : 
-
-    load_driver()
-    _key_down('t')
-    time.sleep(2)
-    _key_up('t')
-    time.sleep(2)
-    _move_rel(111,44)
-    # unload_driver()
-    
+    run_all_tests()
