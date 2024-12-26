@@ -157,7 +157,7 @@ void __cdecl MouseXButton1Down()
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
-	mid.ButtonFlags = MouseXButton1Down;
+	mid.ButtonFlags = MOUSE_BUTTON_4_DOWN;
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
@@ -166,7 +166,7 @@ void __cdecl MouseXButton1Up()
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
-	mid.ButtonFlags = MouseXButton1Up;
+	mid.ButtonFlags = MOUSE_BUTTON_4_UP;
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
@@ -175,7 +175,7 @@ void __cdecl MouseXButton2Down()
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
-	mid.ButtonFlags = MouseXButton2Down;
+	mid.ButtonFlags = MOUSE_BUTTON_5_DOWN;
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
@@ -184,7 +184,7 @@ void __cdecl MouseXButton2Up()
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
-	mid.ButtonFlags = MouseXButton2Up;
+	mid.ButtonFlags = MOUSE_BUTTON_5_UP;
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
@@ -216,19 +216,21 @@ BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 	}
 
 	//创建驱动所对应的服务
-	hServiceDDK = CreateServiceA(hServiceMgr,
-		lpszDriverName, //驱动程序的在注册表中的名字  
-		lpszDriverName, // 注册表驱动程序的 DisplayName 值  
-		SERVICE_ALL_ACCESS, // 加载驱动程序的访问权限  
-		SERVICE_KERNEL_DRIVER,// 表示加载的服务是驱动程序  
-		SERVICE_DEMAND_START, // 注册表驱动程序的 Start 值  
-		SERVICE_ERROR_IGNORE, // 注册表驱动程序的 ErrorControl 值  
-		lpszDriverPath, // 注册表驱动程序的 ImagePath 值  
-		NULL,
-		NULL,
-		NULL,
-		NULL,
-		NULL);
+	hServiceDDK = CreateServiceA(
+		hServiceMgr,
+		lpszDriverName,        //驱动程序的在注册表中的名字  
+		lpszDriverName,        // 注册表驱动程序的 DisplayName 值  
+		SERVICE_ALL_ACCESS,    // 加载驱动程序的访问权限  
+		SERVICE_KERNEL_DRIVER, // 表示加载的服务是驱动程序  
+		SERVICE_DEMAND_START,  // 注册表驱动程序的 Start 值  
+		SERVICE_ERROR_IGNORE,  // 注册表驱动程序的 ErrorControl 值  
+		lpszDriverPath,        // 注册表驱动程序的 ImagePath 值  
+		NULL,                  // LoadOrderGroup
+		NULL,                  // TagId
+		NULL,                  // Dependencies
+		NULL,                  // ServiceStartName
+		NULL                   // Password
+	);
 
 	DWORD dwRtn;
 	//判断服务是否失败
@@ -318,6 +320,7 @@ BOOL __cdecl UnloadNTDriver(char* szSvrName)
 	SC_HANDLE hServiceMgr = NULL;//SCM管理器的句柄
 	SC_HANDLE hServiceDDK = NULL;//NT驱动程序的服务句柄
 	SERVICE_STATUS SvrSta;
+	ZeroMemory(&SvrSta, sizeof(SERVICE_STATUS));  // 使用ZeroMemory初始化结构体
 	//打开SCM管理器
 	hServiceMgr = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
 	if (hServiceMgr == NULL)
