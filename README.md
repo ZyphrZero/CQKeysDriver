@@ -1,7 +1,22 @@
 # KMDLL
 
-## kmclassdll
-[kmclass](https://github.com/BestBurning/kmclass) 虚拟键鼠驱动的动态库
+## 声明
+_本项目遵循 AGPLv3 开源协议基于以下原始项目修改:_
+- kmclass: `https://github.com/BestBurning/kmclass`
+- kmclassdll: `https://github.com/BestBurning/kmclassdll`
+
+## kmclass驱动程序
+
+### 编译
+建议使用[Visual Studio 2019](https://visualstudio.microsoft.com/zh-hans/vs/)进行编译
+
+### 资料
+
+- 错误代码 [Error Codes](https://docs.microsoft.com/zh-cn/windows/win32/debug/system-error-codes)
+- [KMDF Hello World](https://docs.microsoft.com/zh-cn/windows-hardware/drivers/gettingstarted/writing-a-very-small-kmdf--driver)
+- [WDK 10](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) 
+
+## kmclassdll动态库
 
 ### 编译
 建议使用[Visual Studio 2019](https://visualstudio.microsoft.com/zh-hans/vs/)进行编译，
@@ -36,17 +51,3 @@ shutdown  -r -t 0
 ```
 python python_examples.py
 ```
-
-
-## kmclass动态库dll
-kmclass虚拟键鼠驱动,可配合 [kmclassdll](https://github.com/BestBurning/kmclassdll) 使用
-
-### 编译
-建议使用[Visual Studio 2019](https://visualstudio.microsoft.com/zh-hans/vs/)进行编译
-
-
-### 资料
-
-- 错误代码 [Error Codes](https://docs.microsoft.com/zh-cn/windows/win32/debug/system-error-codes)
-- [KMDF Hello World](https://docs.microsoft.com/zh-cn/windows-hardware/drivers/gettingstarted/writing-a-very-small-kmdf--driver)
-- [WDK 10](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) 
