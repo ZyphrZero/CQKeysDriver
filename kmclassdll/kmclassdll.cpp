@@ -28,6 +28,10 @@ extern "C" __declspec(dllexport) void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy
 extern "C" __declspec(dllexport) void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy);
 extern "C" __declspec(dllexport) BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath);
 extern "C" __declspec(dllexport) BOOL __cdecl UnloadNTDriver(char* szSvrName);
+extern "C" __declspec(dllexport) void __cdecl MouseXButton1Down();
+extern "C" __declspec(dllexport) void __cdecl MouseXButton1Up();
+extern "C" __declspec(dllexport) void __cdecl MouseXButton2Down();
+extern "C" __declspec(dllexport) void __cdecl MouseXButton2Up();
 
 void SetHandle()
 {
@@ -47,6 +51,7 @@ void SetHandle()
 //}
 
 
+// 按键按下
 void __cdecl KeyDown(USHORT VirtualKey)
 {
 	KEYBOARD_INPUT_DATA  kid;
@@ -144,6 +149,42 @@ void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy)
 	mid.Flags = MOUSE_MOVE_ABSOLUTE;
 	mid.LastX = dx * 0xffff / GetSystemMetrics(SM_CXSCREEN);
 	mid.LastY = dy * 0xffff / GetSystemMetrics(SM_CYSCREEN);
+	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+}
+
+void __cdecl MouseXButton1Down()
+{
+	MOUSE_INPUT_DATA  mid;
+	DWORD dwOutput;
+	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
+	mid.ButtonFlags = MouseXButton1Down;
+	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+}
+
+void __cdecl MouseXButton1Up()
+{
+	MOUSE_INPUT_DATA  mid;
+	DWORD dwOutput;
+	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
+	mid.ButtonFlags = MouseXButton1Up;
+	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+}
+
+void __cdecl MouseXButton2Down()
+{
+	MOUSE_INPUT_DATA  mid;
+	DWORD dwOutput;
+	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
+	mid.ButtonFlags = MouseXButton2Down;
+	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+}
+
+void __cdecl MouseXButton2Up()
+{
+	MOUSE_INPUT_DATA  mid;
+	DWORD dwOutput;
+	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
+	mid.ButtonFlags = MouseXButton2Up;
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 

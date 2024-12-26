@@ -3,6 +3,8 @@
 .vs/
 x64/
 *.vcxproj.user
+.vscode/
+dll/
 
 # Compiled Object files
 *.slo

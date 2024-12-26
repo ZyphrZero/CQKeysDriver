@@ -152,15 +152,10 @@ typedef struct _MOUSE_INPUT_DATA {
 // 鼠标滚轮
 #define MOUSE_WHEEL             0x0400
 
-
-//
-// Define the mouse indicator flags.
-//
-
+// 定义鼠标指示标志
 #define MOUSE_MOVE_RELATIVE         0  // 相对移动
 #define MOUSE_MOVE_ABSOLUTE         1  // 绝对移动
 #define MOUSE_VIRTUAL_DESKTOP    0x02  // 坐标映射到虚拟桌面
 #define MOUSE_ATTRIBUTES_CHANGED 0x04  // 请求鼠标属性
-
 
 #endif
