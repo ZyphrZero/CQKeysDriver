@@ -237,8 +237,9 @@ NTSTATUS SearchDeviceExtension(
         RtlInitUnicodeString(&classDriverName, L"\\Driver\\mouclass");
     }
     
-    // 查找附加设备
+    // 使用链表遍历算法
     while (tempDevice->AttachedDevice != NULL) {
+        // 检查是否是目标类驱动
         if (RtlCompareUnicodeString(
             &tempDevice->AttachedDevice->DriverObject->DriverName,
             &classDriverName,
@@ -262,21 +263,23 @@ NTSTATUS SearchDeviceExtension(
     const ULONG MAX_SEARCH_SIZE = 4096;  // 最大搜索范围
     
     __try {
+        // 使用分层线性扫描算法
         for (ULONG i = 0; i < MAX_SEARCH_SIZE; i++, deviceExt++) {
-            // 验证内存访问
-            if (!MmIsAddressValid(deviceExt)) {
-                break;
-            }
-            
+            // 1. 内存安全检查
+            if (!MmIsAddressValid(deviceExt)) break;
+
+            // 2. 内存访问保护，获取当前位置的值
             PVOID value = *(PVOID*)deviceExt;
             
-            // 检查是否找到目标
+            // 3. 设备对象匹配
             if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+                // 4. 检查是否已经找到设备对象和回调函数
                 if (g_KoMCallBack.KdbDeviceObject && g_KoMCallBack.KeyboardClassServiceCallback) {
                     status = STATUS_SUCCESS;
                     break;
                 }
                 
+                // 5. 设备对象匹配
                 if (value == targetDevice) {
                     g_KoMCallBack.KdbDeviceObject = targetDevice;
                     continue;
@@ -293,10 +296,11 @@ NTSTATUS SearchDeviceExtension(
                 }
             }
             
-            // 验证回调函数地址
+            // 6. 验证是否为回调函数
             if (value > driverStart && 
                 value < (PVOID)((PUCHAR)driverStart + driverSize) &&
                 MmIsAddressValid(value)) {
+                // 7. 记录回调函数
                 if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
                     g_KoMCallBack.KeyboardClassServiceCallback = (MY_KEYBOARDCALLBACK)value;
                 } else {
