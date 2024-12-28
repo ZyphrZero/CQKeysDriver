@@ -50,15 +50,15 @@
 //
 
 
-#define KEYMOUSE_DEVICE_NAME		    L"\\Device\\kmclass"
-#define KEYMOUSE_DOS_DEVICE_NAME	    L"\\DosDevices\\kmclass"
+#define KEYMOUSE_DEVICE_NAME		    L"\\Device\\lykeys"
+#define KEYMOUSE_DOS_DEVICE_NAME	    L"\\DosDevices\\lykeys"
 
 #ifdef  UNICODE
-#define KEYMOUSE_WIN32_DEVICE_NAME	    L"\\\\.\\kmclass"
-#define KEYMOUSE_DRIVER_NAME            L"kmclass"
+#define KEYMOUSE_WIN32_DEVICE_NAME	    L"\\\\.\\lykeys"
+#define KEYMOUSE_DRIVER_NAME            L"lykeys"
 #else
-#define KEYMOUSE_WIN32_DEVICE_NAME	    "\\\\.\\kmclass"
-#define KEYMOUSE_DRIVER_NAME            "kmclass"
+#define KEYMOUSE_WIN32_DEVICE_NAME	    "\\\\.\\lykeys"
+#define KEYMOUSE_DRIVER_NAME            "lykeys"
 #endif
 
 
@@ -144,10 +144,10 @@ typedef struct _MOUSE_INPUT_DATA {
 #define MOUSE_BUTTON_5_DOWN     0x0100  // 后侧键(X2)按下
 #define MOUSE_BUTTON_5_UP       0x0200  // 后侧键(X2)释放
 
-#define MouseXButton1Down     MOUSE_BUTTON_4_DOWN
-#define MouseXButton1Up       MOUSE_BUTTON_4_UP
-#define MouseXButton2Down     MOUSE_BUTTON_5_DOWN
-#define MouseXButton2Up       MOUSE_BUTTON_5_UP
+#define Mouse_XButton_1_Down     MOUSE_BUTTON_4_DOWN
+#define Mouse_XButton_1_Up       MOUSE_BUTTON_4_UP
+#define Mouse_XButton_2_Down     MOUSE_BUTTON_5_DOWN
+#define Mouse_XButton_2_Up       MOUSE_BUTTON_5_UP
 
 // 鼠标滚轮
 #define MOUSE_WHEEL             0x0400

@@ -35,8 +35,8 @@ class DriverManager:
         if not dll_path or not sys_path:
             logging.info("使用默认驱动路径")
             base_dir = os.path.dirname(os.path.dirname(__file__))
-            self.dll_path = dll_path or os.path.join(base_dir, 'kmclassdll', 'x64', 'Debug', 'kmclassdll.dll')
-            self.sys_path = sys_path or os.path.join(base_dir, 'kmclass', 'x64', 'Debug', 'kmclass.sys')
+            self.dll_path = dll_path or os.path.join(base_dir, 'lykeysdll', 'x64', 'Debug', 'lykeysdll.dll')
+            self.sys_path = sys_path or os.path.join(base_dir, 'lykeys', 'x64', 'Debug', 'lykeys.sys')
         else:
             self.dll_path = dll_path
             self.sys_path = sys_path
@@ -72,7 +72,7 @@ class DriverManager:
             self._unload_driver()
             
             # 加载驱动
-            if not self.driver.LoadNTDriver(b'kmclass', self.sys_path.encode()):
+            if not self.driver.LoadNTDriver(b'lykeys', self.sys_path.encode()):
                 raise RuntimeError("驱动加载失败")
             
             # time.sleep(1)  # 等待服务启动
@@ -91,7 +91,7 @@ class DriverManager:
         """卸载驱动"""
         try:
             if self.driver:
-                self.driver.UnloadNTDriver(b'kmclass')
+                self.driver.UnloadNTDriver(b'lykeys')
                 
                 # time.sleep(1)
                 

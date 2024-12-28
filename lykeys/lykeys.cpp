@@ -1,11 +1,11 @@
 #include "stdafx.h"
-#include "kmclass.h"
+#include "lykeys.h"
 #include "common.h"
 
 // 前向声明
 NTSTATUS SearchServiceFromKdbExt(PDRIVER_OBJECT KbdDriverObject, PDEVICE_OBJECT pPortDev);
 NTSTATUS SearchServiceFromMouExt(PDRIVER_OBJECT MouDriverObject, PDEVICE_OBJECT pPortDev);
-void kmclassUnload(IN PDRIVER_OBJECT DriverObject);
+void lykeysUnload(IN PDRIVER_OBJECT DriverObject);
 
 // 系统版本信息结构
 typedef struct _SYSTEM_VERSION_INFO {
@@ -46,7 +46,7 @@ typedef struct _DEVICE_EXTENSION {
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION;
 
 // 回调结构
-struct KM_CALLBACK {
+struct LY_CALLBACK {
     PDEVICE_OBJECT KdbDeviceObject;
     MY_KEYBOARDCALLBACK KeyboardClassServiceCallback;
     PDEVICE_OBJECT MouDeviceObject;
@@ -71,7 +71,7 @@ struct KM_CALLBACK {
 } g_KoMCallBack;
 
 // 内联处理函数
-__forceinline NTSTATUS kmclassCreateClose(IN PIRP Irp)
+__forceinline NTSTATUS lykeysCreateClose(IN PIRP Irp)
 {
     Irp->IoStatus.Status = STATUS_SUCCESS;
     Irp->IoStatus.Information = 0;
@@ -79,7 +79,7 @@ __forceinline NTSTATUS kmclassCreateClose(IN PIRP Irp)
     return STATUS_SUCCESS;
 }
 
-__forceinline NTSTATUS kmclassDefaultHandler(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp)
+__forceinline NTSTATUS lykeysDefaultHandler(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp)
 {
     Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
     Irp->IoStatus.Information = 0;
@@ -88,7 +88,7 @@ __forceinline NTSTATUS kmclassDefaultHandler(IN PDEVICE_OBJECT DeviceObject, IN 
 }
 
 // 优化设备控制函数
-NTSTATUS kmclassDispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp)
+NTSTATUS lykeysDispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp)
 {
     const PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
     const PDEVICE_EXTENSION deviceExtension = static_cast<PDEVICE_EXTENSION>(DeviceObject->DeviceExtension);
@@ -137,7 +137,7 @@ NTSTATUS kmclassDispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject, IN PIRP Ir
     }
     __except(EXCEPTION_EXECUTE_HANDLER) {
         status = GetExceptionCode();
-        KdPrint(("Exception in kmclassDispatchDeviceControl: 0x%X\n", status));
+        KdPrint(("Exception in lykeysDispatchDeviceControl: 0x%X\n", status));
     }
 
     Irp->IoStatus.Status = status;
@@ -146,10 +146,10 @@ NTSTATUS kmclassDispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject, IN PIRP Ir
 }
 
 // 设备类型枚举
-typedef enum _DEVICE_TYPE_KM {  // 重命名以避免与Windows定义冲突
-    DEVICE_TYPE_KM_KEYBOARD,
-    DEVICE_TYPE_KM_MOUSE
-} DEVICE_TYPE_KM;
+typedef enum _DEVICE_TYPE_LY {  // 重命名以避免与Windows定义冲突
+    DEVICE_TYPE_LY_KEYBOARD,
+    DEVICE_TYPE_LY_MOUSE
+} DEVICE_TYPE_LY;
 
 // 设备信息结构
 typedef struct _DEVICE_SEARCH_INFO {
@@ -160,7 +160,7 @@ typedef struct _DEVICE_SEARCH_INFO {
 } DEVICE_SEARCH_INFO, *PDEVICE_SEARCH_INFO;
 
 // 统一的设备搜索函数
-NTSTATUS SearchDeviceCallback(DEVICE_TYPE_KM DeviceType) 
+NTSTATUS SearchDeviceCallback(DEVICE_TYPE_LY DeviceType) 
 {
     NTSTATUS status = STATUS_SUCCESS;
     UNICODE_STRING usbDevName, ps2DevName, classDevName;
@@ -173,7 +173,7 @@ NTSTATUS SearchDeviceCallback(DEVICE_TYPE_KM DeviceType)
     DEVICE_SEARCH_INFO devInfo = {0};
     
     // 根据设备类型设置相应的驱动名称
-    if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+    if (DeviceType == DEVICE_TYPE_LY_KEYBOARD) {
         RtlInitUnicodeString(&usbDevName, L"\\Driver\\kbdhid");
         RtlInitUnicodeString(&ps2DevName, L"\\Driver\\i8042prt");
         RtlInitUnicodeString(&classDevName, L"\\Driver\\kbdclass");
@@ -256,7 +256,7 @@ NTSTATUS SearchDeviceCallback(DEVICE_TYPE_KM DeviceType)
     
     // 搜索设备回调
     while (targetDevice) {
-        if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+        if (DeviceType == DEVICE_TYPE_LY_KEYBOARD) {
             status = SearchServiceFromKdbExt(classDriverObj, targetDevice);
         } else {
             status = SearchServiceFromMouExt(classDriverObj, targetDevice);
@@ -290,19 +290,19 @@ cleanup:
 
 NTSTATUS SearchKdbServiceCallBack()
 {
-    return SearchDeviceCallback(DEVICE_TYPE_KM_KEYBOARD);
+    return SearchDeviceCallback(DEVICE_TYPE_LY_KEYBOARD);
 }
 
 NTSTATUS SearchMouServiceCallBack()
 {
-    return SearchDeviceCallback(DEVICE_TYPE_KM_MOUSE);
+    return SearchDeviceCallback(DEVICE_TYPE_LY_MOUSE);
 }
 
 // 设备扩展搜索函数的统一实现
 NTSTATUS SearchDeviceExtension(
     PDRIVER_OBJECT ClassDriverObject,
     PDEVICE_OBJECT PortDevice,
-    DEVICE_TYPE_KM DeviceType)
+    DEVICE_TYPE_LY DeviceType)
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     
@@ -318,7 +318,7 @@ NTSTATUS SearchDeviceExtension(
         UNICODE_STRING classDriverName;
         
         // 2. 设置类驱动名称
-        if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+        if (DeviceType == DEVICE_TYPE_LY_KEYBOARD) {
             RtlInitUnicodeString(&classDriverName, L"\\Driver\\kbdclass");
         } else {
             RtlInitUnicodeString(&classDriverName, L"\\Driver\\mouclass");
@@ -386,7 +386,7 @@ NTSTATUS SearchDeviceExtension(
             }
             
             // 设备对象匹配
-            if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+            if (DeviceType == DEVICE_TYPE_LY_KEYBOARD) {
                 if (value == targetDevice) {
                     g_KoMCallBack.KdbDeviceObject = targetDevice;
                     continue;
@@ -429,7 +429,7 @@ NTSTATUS SearchDeviceExtension(
         
         // 7. 验证结果
         if (NT_SUCCESS(status)) {
-            if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+            if (DeviceType == DEVICE_TYPE_LY_KEYBOARD) {
                 if (!g_KoMCallBack.KdbDeviceObject || !g_KoMCallBack.KeyboardClassServiceCallback) {
                     status = STATUS_UNSUCCESSFUL;
                 }
@@ -450,12 +450,12 @@ NTSTATUS SearchDeviceExtension(
 
 NTSTATUS SearchServiceFromKdbExt(PDRIVER_OBJECT KbdDriverObject, PDEVICE_OBJECT pPortDev)
 {
-    return SearchDeviceExtension(KbdDriverObject, pPortDev, DEVICE_TYPE_KM_KEYBOARD);
+    return SearchDeviceExtension(KbdDriverObject, pPortDev, DEVICE_TYPE_LY_KEYBOARD);
 }
 
 NTSTATUS SearchServiceFromMouExt(PDRIVER_OBJECT MouDriverObject, PDEVICE_OBJECT pPortDev)
 {
-    return SearchDeviceExtension(MouDriverObject, pPortDev, DEVICE_TYPE_KM_MOUSE);
+    return SearchDeviceExtension(MouDriverObject, pPortDev, DEVICE_TYPE_LY_MOUSE);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -497,13 +497,13 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
 
         // 4. 设置分发函数
         for (ULONG i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++) {
-        DriverObject->MajorFunction[i] = kmclassDefaultHandler;
+        DriverObject->MajorFunction[i] = lykeysDefaultHandler;
         }
 
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = [](PDEVICE_OBJECT, PIRP Irp) { return kmclassCreateClose(Irp); };
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = [](PDEVICE_OBJECT, PIRP Irp) { return kmclassCreateClose(Irp); };
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = kmclassDispatchDeviceControl;
-    DriverObject->DriverUnload = kmclassUnload;
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = [](PDEVICE_OBJECT, PIRP Irp) { return lykeysCreateClose(Irp); };
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = [](PDEVICE_OBJECT, PIRP Irp) { return lykeysCreateClose(Irp); };
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = lykeysDispatchDeviceControl;
+    DriverObject->DriverUnload = lykeysUnload;
 
         // 5. 创建设备对象
         status = IoCreateDevice(
@@ -582,7 +582,7 @@ cleanup:
     return status;
 }
 
-void kmclassUnload(IN PDRIVER_OBJECT DriverObject)
+void lykeysUnload(IN PDRIVER_OBJECT DriverObject)
 {
     UNICODE_STRING win32Device;
     PDEVICE_OBJECT deviceObject = DriverObject->DeviceObject;
@@ -618,35 +618,34 @@ void kmclassUnload(IN PDRIVER_OBJECT DriverObject)
     KdPrint(("驱动卸载完成\n"));
 }
 
-NTSTATUS GetKmclassInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
+NTSTATUS GetLyKeysInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
 {
     NTSTATUS           status;
     UNICODE_STRING     ObjectName;
-    PCWSTR             kmhidName, kmclassName, kmName;
-    PVOID              kmDriverStart;
-    ULONG              kmDriverSize;
-    PVOID* TargetDeviceObject;
-    PVOID* TargetclassCallback;
-    PDEVICE_EXTENSION  deviceExtension;
-    PDRIVER_OBJECT     kmDriverObject = NULL;
-    PDRIVER_OBJECT     kmclassDriverObject = NULL;
-
+    PCWSTR            baseDeviceName, hidDriverName, classDriverName;
+    PVOID             classDriverStart;
+    ULONG             classDriverSize;
+    PVOID*            TargetDeviceObject;
+    PVOID*            TargetclassCallback;
+    PDEVICE_EXTENSION deviceExtension;
+    PDRIVER_OBJECT    hidDriverObject = NULL;
+    PDRIVER_OBJECT    classDriverObject = NULL;
 
     deviceExtension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
 
     switch (Index)
     {
     case KEYBOARD_DEVICE:
-        kmName = L"kbd";
-        kmhidName = L"\\Driver\\kbdhid";
-        kmclassName = L"\\Driver\\kbdclass";
+        baseDeviceName = L"kbd";
+        hidDriverName = L"\\Driver\\kbdhid";
+        classDriverName = L"\\Driver\\kbdclass";
         TargetDeviceObject = (PVOID*)&(deviceExtension->kbdDeviceObject);
         TargetclassCallback = (PVOID*)&(deviceExtension->My_KbdCallback);
         break;
     case MOUSE_DEVICE:
-        kmName = L"mou";
-        kmhidName = L"\\Driver\\mouhid";
-        kmclassName = L"\\Driver\\mouclass";
+        baseDeviceName = L"mou";
+        hidDriverName = L"\\Driver\\mouhid";
+        classDriverName = L"\\Driver\\mouclass";
         TargetDeviceObject = (PVOID*)&(deviceExtension->mouDeviceObject);
         TargetclassCallback = (PVOID*)&(deviceExtension->My_MouCallback);
         break;
@@ -654,9 +653,8 @@ NTSTATUS GetKmclassInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
         return STATUS_INVALID_PARAMETER;
     }
 
-
     // 通过USB类设备获取驱动对象
-    RtlInitUnicodeString(&ObjectName, kmhidName);
+    RtlInitUnicodeString(&ObjectName, hidDriverName);
     status = ObReferenceObjectByName(&ObjectName,
         OBJ_CASE_INSENSITIVE,
         NULL,
@@ -664,8 +662,7 @@ NTSTATUS GetKmclassInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
         *IoDriverObjectType,
         KernelMode,
         NULL,
-        (PVOID*)&kmDriverObject);
-
+        (PVOID*)&hidDriverObject);
 
     if (!NT_SUCCESS(status))
     {
@@ -678,7 +675,7 @@ NTSTATUS GetKmclassInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
             *IoDriverObjectType,
             KernelMode,
             NULL,
-            (PVOID*)&kmDriverObject);
+            (PVOID*)&hidDriverObject);
         if (!NT_SUCCESS(status))
         {
             KdPrint(("Couldn't Get the i8042prt Driver Object\n"));
@@ -686,8 +683,8 @@ NTSTATUS GetKmclassInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
         }
     }
 
-    // 通过kmclass获取键盘鼠标类驱动对象
-    RtlInitUnicodeString(&ObjectName, kmclassName);
+    // 通过class driver获取键盘鼠标类驱动对象
+    RtlInitUnicodeString(&ObjectName, classDriverName);
     status = ObReferenceObjectByName(&ObjectName,
         OBJ_CASE_INSENSITIVE,
         NULL,
@@ -695,53 +692,53 @@ NTSTATUS GetKmclassInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
         *IoDriverObjectType,
         KernelMode,
         NULL,
-        (PVOID*)&kmclassDriverObject);
+        (PVOID*)&classDriverObject);
 
     if (!NT_SUCCESS(status))
     {
-        KdPrint(("Couldn't Get the kmclass Driver Object\n"));
+        KdPrint(("Couldn't Get the Class Driver Object\n"));
         return status;
     }
     else
     {
-        kmDriverStart = kmclassDriverObject->DriverStart;
-        kmDriverSize = kmclassDriverObject->DriverSize;
+        classDriverStart = classDriverObject->DriverStart;
+        classDriverSize = classDriverObject->DriverSize;
     }
 
     ULONG             DeviceExtensionSize;
-    PULONG            kmDeviceExtension;
-    PDEVICE_OBJECT    kmTempDeviceObject;
-    PDEVICE_OBJECT    kmclassDeviceObject;
-    PDEVICE_OBJECT    kmDeviceObject = kmDriverObject->DeviceObject;
-    while (kmDeviceObject)
+    PULONG            deviceExt;
+    PDEVICE_OBJECT    tempDeviceObject;
+    PDEVICE_OBJECT    currentDeviceObject = classDriverObject->DeviceObject;
+    
+    while (currentDeviceObject)
     {
-        kmTempDeviceObject = kmDeviceObject;
-        while (kmTempDeviceObject)
+        tempDeviceObject = currentDeviceObject;
+        while (tempDeviceObject)
         {
-            kmDeviceExtension = (PULONG)kmTempDeviceObject->DeviceExtension;
-            kmclassDeviceObject = kmclassDriverObject->DeviceObject;
-            DeviceExtensionSize = ((ULONG)kmTempDeviceObject->DeviceObjectExtension - (ULONG)kmTempDeviceObject->DeviceExtension) / 4;
-            while (kmclassDeviceObject)
+            deviceExt = (PULONG)tempDeviceObject->DeviceExtension;
+            currentDeviceObject = classDriverObject->DeviceObject;
+            DeviceExtensionSize = ((ULONG)tempDeviceObject->DeviceObjectExtension - (ULONG)tempDeviceObject->DeviceExtension) / 4;
+            while (currentDeviceObject)
             {
                 for (ULONG i = 0; i < DeviceExtensionSize; i++)
                 {
-                    if (kmDeviceExtension[i] == (ULONG)kmclassDeviceObject &&
-                        kmDeviceExtension[i + 1] > (ULONG)kmDriverStart &&
-                        kmDeviceExtension[i + 1] < (ULONG)kmDriverStart + kmDriverSize)
+                    if (deviceExt[i] == (ULONG)currentDeviceObject &&
+                        deviceExt[i + 1] > (ULONG)classDriverStart &&
+                        deviceExt[i + 1] < (ULONG)classDriverStart + classDriverSize)
                     {
                         // 将获取到的设备对象保存到自定义扩展设备结构
-                        *TargetDeviceObject = (PVOID)kmDeviceExtension[i];
-                        *TargetclassCallback = (PVOID)kmDeviceExtension[i + 1];
-                        KdPrint(("%SDeviceObject == 0x%x\n", kmName, kmDeviceExtension[i]));
-                        KdPrint(("%SClassServiceCallback == 0x%x\n", kmName, kmDeviceExtension[i + 1]));
+                        *TargetDeviceObject = (PVOID)deviceExt[i];
+                        *TargetclassCallback = (PVOID)deviceExt[i + 1];
+                        KdPrint(("%SDeviceObject == 0x%x\n", baseDeviceName, deviceExt[i]));
+                        KdPrint(("%SClassServiceCallback == 0x%x\n", baseDeviceName, deviceExt[i + 1]));
                         return STATUS_SUCCESS;
                     }
                 }
-                kmclassDeviceObject = kmclassDeviceObject->NextDevice;
+                currentDeviceObject = currentDeviceObject->NextDevice;
             }
-            kmTempDeviceObject = kmTempDeviceObject->AttachedDevice;
+            tempDeviceObject = tempDeviceObject->AttachedDevice;
         }
-        kmDeviceObject = kmDeviceObject->NextDevice;
+        currentDeviceObject = currentDeviceObject->NextDevice;
     }
     return STATUS_UNSUCCESSFUL;
 }

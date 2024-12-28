@@ -50,15 +50,15 @@
 //
 
 
-#define KEYMOUSE_DEVICE_NAME		    L"\\Device\\kmclass"
-#define KEYMOUSE_DOS_DEVICE_NAME	    L"\\DosDevices\\kmclass"
+#define KEYMOUSE_DEVICE_NAME		    L"\\Device\\lykeys"
+#define KEYMOUSE_DOS_DEVICE_NAME	    L"\\DosDevices\\lykeys"
 
 #ifdef  UNICODE
-#define KEYMOUSE_WIN32_DEVICE_NAME	    L"\\\\.\\kmclass"
-#define KEYMOUSE_DRIVER_NAME            L"kmclass"
+#define KEYMOUSE_WIN32_DEVICE_NAME	    L"\\\\.\\lykeys"
+#define KEYMOUSE_DRIVER_NAME            L"lykeys"
 #else
-#define KEYMOUSE_WIN32_DEVICE_NAME	    "\\\\.\\kmclass"
-#define KEYMOUSE_DRIVER_NAME            "kmclass"
+#define KEYMOUSE_WIN32_DEVICE_NAME	    "\\\\.\\lykeys"
+#define KEYMOUSE_DRIVER_NAME            "lykeys"
 #endif
 
 

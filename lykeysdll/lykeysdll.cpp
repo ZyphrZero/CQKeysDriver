@@ -1,5 +1,5 @@
 #include "pch.h"
-#include "kmclass.h"
+#include "lykeys.h"
 #include <windows.h>
 #include <winsvc.h>  
 #include <conio.h>  
@@ -218,7 +218,7 @@ extern "C" __declspec(dllexport) ULONGLONG __cdecl GetLastCheckTime()
 void SetHandle()
 {
 	drvhandle = CreateFileA(
-		"\\\\.\\kmclass",
+		"\\\\.\\lykeys",
 		GENERIC_WRITE | GENERIC_READ,
 		0,
 		NULL,
@@ -609,8 +609,8 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 )
 {/*
 if (ul_reason_for_call==DLL_PROCESS_ATTACH)
-  { LoadNTDriver("kmclass","kmclass.sys");
-	drvhandle= CreateFileA("\\\\.\\kmclass",
+  { LoadNTDriver("lykeys","lykeys.sys");
+	drvhandle= CreateFileA("\\\\.\\lykeys",
 		GENERIC_WRITE | GENERIC_READ,
 		0,
 		NULL,
@@ -620,7 +620,7 @@ if (ul_reason_for_call==DLL_PROCESS_ATTACH)
    }
 else if (ul_reason_for_call==DLL_PROCESS_DETACH)
    {CloseHandle(drvhandle);
-	  UnloadNTDriver("kmclass");
+	  UnloadNTDriver("lykeys");
 	}*/
 	return TRUE;
 }

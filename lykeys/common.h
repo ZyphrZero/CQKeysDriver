@@ -1,7 +1,7 @@
 // common.h
 #pragma once
 #include <ntddk.h>
-#include "kmclass.h"
+#include "lykeys.h"
 
 
 

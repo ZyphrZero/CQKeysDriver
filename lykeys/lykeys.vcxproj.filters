@@ -19,12 +19,12 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <Inf Include="kmclass.inf">
+    <Inf Include="lykeys.inf">
       <Filter>Driver Files</Filter>
     </Inf>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="kmclass.cpp">
+    <ClCompile Include="lykeys.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="stdafx.cpp">
@@ -35,7 +35,7 @@
     <ClInclude Include="common.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="kmclass.h">
+    <ClInclude Include="lykeys.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="stdafx.h">

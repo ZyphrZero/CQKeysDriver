@@ -12,11 +12,11 @@ import os
 import json
 
 
-class KMClassGUI:
+class LYKeysGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("键鼠驱动测试工具")
-        self.root.geometry("620x720")
+        self.root.geometry("570x750")
         
         # 初始化组件
         self.driver_mgr = None  # 驱动管理器
@@ -689,5 +689,5 @@ class KMClassGUI:
         self.press_count_label.config(text=f"按键次数: {self.press_count}")
 
 if __name__ == '__main__':
-    app = KMClassGUI()
+    app = LYKeysGUI()
     app.run() 

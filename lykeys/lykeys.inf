@@ -1,5 +1,5 @@
 ;
-; kmclass.inf
+; lykeys.inf
 ;
 
 [Version]
@@ -7,19 +7,19 @@ Signature="$WINDOWS NT$"
 Class=System ; 改用System类而不是Sample
 ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318} ; System类的GUID
 Provider=%ManufacturerName%
-CatalogFile=kmclass.cat
+CatalogFile=lykeys.cat
 DriverVer=01/01/2024,1.0.0.1
 PnpLockdown=1
 
 [DestinationDirs]
 DefaultDestDir = 12
-kmclass_Device_CoInstaller_CopyFiles = 11
+lykeys_Device_CoInstaller_CopyFiles = 11
 
 [SourceDisksNames]
 1 = %DiskName%,,,""
 
 [SourceDisksFiles]
-kmclass.sys  = 1,,
+lykeys.sys  = 1,,
 WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1
 
 ;*****************************************
@@ -30,48 +30,48 @@ WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1
 %ManufacturerName%=Standard,NT$ARCH$
 
 [Standard.NT$ARCH$]
-%kmclass.DeviceDesc%=kmclass_Device, Root\kmclass
+%lykeys.DeviceDesc%=lykeys_Device, Root\lykeys
 
-[kmclass_Device.NT]
+[lykeys_Device.NT]
 CopyFiles=Drivers_Dir
 
 [Drivers_Dir]
-kmclass.sys
+lykeys.sys
 
 ;-------------- Service installation
-[kmclass_Device.NT.Services]
-AddService = kmclass,%SPSVCINST_ASSOCSERVICE%, kmclass_Service_Inst
+[lykeys_Device.NT.Services]
+AddService = lykeys,%SPSVCINST_ASSOCSERVICE%, lykeys_Service_Inst
 
-; -------------- kmclass driver install sections
-[kmclass_Service_Inst]
-DisplayName    = %kmclass.SVCDESC%
+; -------------- lykeys driver install sections
+[lykeys_Service_Inst]
+DisplayName    = %lykeys.SVCDESC%
 ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
 StartType      = 3               ; SERVICE_DEMAND_START
 ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %12%\kmclass.sys
+ServiceBinary  = %12%\lykeys.sys
 
 ;
-;--- kmclass_Device Coinstaller installation ------
+;--- lykeys_Device Coinstaller installation ------
 ;
 
-[kmclass_Device.NT.CoInstallers]
-AddReg=kmclass_Device_CoInstaller_AddReg
-CopyFiles=kmclass_Device_CoInstaller_CopyFiles
+[lykeys_Device.NT.CoInstallers]
+AddReg=lykeys_Device_CoInstaller_AddReg
+CopyFiles=lykeys_Device_CoInstaller_CopyFiles
 
-[kmclass_Device_CoInstaller_AddReg]
+[lykeys_Device_CoInstaller_AddReg]
 HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
 
-[kmclass_Device_CoInstaller_CopyFiles]
+[lykeys_Device_CoInstaller_CopyFiles]
 WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
 
-[kmclass_Device.NT.Wdf]
-KmdfService =  kmclass, kmclass_wdfsect
-[kmclass_wdfsect]
+[lykeys_Device.NT.Wdf]
+KmdfService =  lykeys, lykeys_wdfsect
+[lykeys_wdfsect]
 KmdfLibraryVersion = $KMDFVERSION$
 
 [Strings]
 SPSVCINST_ASSOCSERVICE= 0x00000002
-ManufacturerName="KMDLL" 
-DiskName = "KMDLL Installation Disk"
-kmclass.DeviceDesc = "KMDLL Keyboard Mouse Driver"
-kmclass.SVCDESC = "KMDLL Keyboard Mouse Service"
+ManufacturerName="LYDLL" 
+DiskName = "LYDLL Installation Disk"
+lykeys.DeviceDesc = "LYDLL Keyboard Mouse Driver"
+lykeys.SVCDESC = "LYDLL Keyboard Mouse Service"
