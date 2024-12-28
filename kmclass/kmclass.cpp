@@ -2,6 +2,10 @@
 #include "kmclass.h"
 #include "common.h"
 
+// 前向声明
+NTSTATUS SearchServiceFromKdbExt(PDRIVER_OBJECT KbdDriverObject, PDEVICE_OBJECT pPortDev);
+NTSTATUS SearchServiceFromMouExt(PDRIVER_OBJECT MouDriverObject, PDEVICE_OBJECT pPortDev);
+
 // 系统版本信息结构
 typedef struct _SYSTEM_VERSION_INFO {
     ULONG MajorVersion;    // 主版本号
@@ -57,11 +61,268 @@ NTSTATUS kmclassDefaultHandler(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
 NTSTATUS kmclassDispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
 NTSTATUS GetKmclassInfo(PDEVICE_OBJECT DeviceObject, USHORT Index);
 
-NTSTATUS  SearchMouServiceCallBack(IN PDRIVER_OBJECT DriverObject);
-NTSTATUS SearchServiceFromMouExt(PDRIVER_OBJECT MouDriverObject, PDEVICE_OBJECT pPortDev);
-NTSTATUS  SearchKdbServiceCallBack(IN PDRIVER_OBJECT DriverObject);
-NTSTATUS SearchServiceFromKdbExt(PDRIVER_OBJECT KbdDriverObject, PDEVICE_OBJECT pPortDev);
+// 设备类型枚举
+typedef enum _DEVICE_TYPE_KM {  // 重命名以避免与Windows定义冲突
+    DEVICE_TYPE_KM_KEYBOARD,
+    DEVICE_TYPE_KM_MOUSE
+} DEVICE_TYPE_KM;
 
+// 设备信息结构
+typedef struct _DEVICE_SEARCH_INFO {
+    UNICODE_STRING DriverName;      // 驱动名称
+    PDRIVER_OBJECT DriverObject;    // 驱动对象
+    PVOID DriverStart;             // 驱动起始地址
+    ULONG DriverSize;              // 驱动大小
+} DEVICE_SEARCH_INFO, *PDEVICE_SEARCH_INFO;
+
+// 统一的设备搜索函数
+NTSTATUS SearchDeviceCallback(DEVICE_TYPE_KM DeviceType) 
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    UNICODE_STRING usbDevName, ps2DevName, classDevName;
+    PDRIVER_OBJECT usbDriverObj = NULL;
+    PDRIVER_OBJECT ps2DriverObj = NULL;
+    PDRIVER_OBJECT classDriverObj = NULL;
+    PDEVICE_OBJECT targetDevice = NULL;
+    
+    // 初始化设备信息
+    DEVICE_SEARCH_INFO devInfo = {0};
+    
+    // 根据设备类型设置相应的驱动名称
+    if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+        RtlInitUnicodeString(&usbDevName, L"\\Driver\\kbdhid");
+        RtlInitUnicodeString(&ps2DevName, L"\\Driver\\i8042prt");
+        RtlInitUnicodeString(&classDevName, L"\\Driver\\kbdclass");
+    } else {
+        RtlInitUnicodeString(&usbDevName, L"\\Driver\\mouhid");
+        RtlInitUnicodeString(&ps2DevName, L"\\Driver\\i8042prt");
+        RtlInitUnicodeString(&classDevName, L"\\Driver\\mouclass");
+    }
+    
+    // 尝试获取USB设备驱动
+    status = ObReferenceObjectByName(
+        &usbDevName,
+        OBJ_CASE_INSENSITIVE,
+        NULL,
+        0,
+        *IoDriverObjectType,
+        KernelMode,
+        NULL,
+        (PVOID*)&usbDriverObj
+    );
+    
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("Failed to get USB driver, trying PS/2: 0x%08X\n", status));
+        // 如果USB设备不存在，尝试PS/2设备
+        status = ObReferenceObjectByName(
+            &ps2DevName,
+            OBJ_CASE_INSENSITIVE,
+            NULL,
+            0,
+            *IoDriverObjectType,
+            KernelMode,
+            NULL,
+            (PVOID*)&ps2DriverObj
+        );
+        
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("Failed to get PS/2 driver: 0x%08X\n", status));
+        }
+    }
+    
+    // 检查是否至少有一个设备驱动可用
+    if (!usbDriverObj && !ps2DriverObj) {
+        KdPrint(("No available device drivers found\n"));
+        status = STATUS_DEVICE_NOT_CONNECTED;
+        goto cleanup;
+    }
+    
+    // 获取类驱动
+    status = ObReferenceObjectByName(
+        &classDevName,
+        OBJ_CASE_INSENSITIVE,
+        NULL,
+        0,
+        *IoDriverObjectType,
+        KernelMode,
+        NULL,
+        (PVOID*)&classDriverObj
+    );
+    
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("Failed to get class driver object: 0x%08X\n", status));
+        goto cleanup;
+    }
+    
+    // 设置驱动信息
+    devInfo.DriverObject = classDriverObj;
+    devInfo.DriverStart = classDriverObj->DriverStart;
+    devInfo.DriverSize = classDriverObj->DriverSize;
+    
+    // 获取目标设备对象
+    PDRIVER_OBJECT activeDriver = usbDriverObj ? usbDriverObj : ps2DriverObj;
+    if (activeDriver && activeDriver->DeviceObject) {
+        targetDevice = activeDriver->DeviceObject;
+        KdPrint(("Using %s driver\n", usbDriverObj ? "USB" : "PS/2"));
+    } else {
+        KdPrint(("No valid device object found\n"));
+        status = STATUS_DEVICE_NOT_CONNECTED;
+        goto cleanup;
+    }
+    
+    // 搜索设备回调
+    while (targetDevice) {
+        if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+            status = SearchServiceFromKdbExt(classDriverObj, targetDevice);
+        } else {
+            status = SearchServiceFromMouExt(classDriverObj, targetDevice);
+        }
+        
+        if (NT_SUCCESS(status)) {
+            KdPrint(("Successfully found device callback\n"));
+            break;
+        }
+        targetDevice = targetDevice->NextDevice;
+    }
+    
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("Failed to find device callback\n"));
+    }
+    
+cleanup:
+    // 清理资源
+    if (usbDriverObj) {
+        ObDereferenceObject(usbDriverObj);
+    }
+    if (ps2DriverObj) {
+        ObDereferenceObject(ps2DriverObj);
+    }
+    if (classDriverObj) {
+        ObDereferenceObject(classDriverObj);
+    }
+    
+    return status;
+}
+
+// 修改原有的搜索函数调用新的统一搜索函数
+NTSTATUS SearchKdbServiceCallBack(IN PDRIVER_OBJECT DriverObject)
+{
+    return SearchDeviceCallback(DEVICE_TYPE_KM_KEYBOARD);
+}
+
+NTSTATUS SearchMouServiceCallBack(IN PDRIVER_OBJECT DriverObject)
+{
+    return SearchDeviceCallback(DEVICE_TYPE_KM_MOUSE);
+}
+
+// 设备扩展搜索函数的统一实现
+NTSTATUS SearchDeviceExtension(
+    PDRIVER_OBJECT ClassDriverObject,
+    PDEVICE_OBJECT PortDevice,
+    DEVICE_TYPE_KM DeviceType)
+{
+    if (!ClassDriverObject || !PortDevice) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    PDEVICE_OBJECT targetDevice = NULL;
+    PDEVICE_OBJECT tempDevice = PortDevice;
+    UNICODE_STRING classDriverName;
+    
+    // 设置类驱动名称
+    if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+        RtlInitUnicodeString(&classDriverName, L"\\Driver\\kbdclass");
+    } else {
+        RtlInitUnicodeString(&classDriverName, L"\\Driver\\mouclass");
+    }
+    
+    // 查找附加设备
+    while (tempDevice->AttachedDevice != NULL) {
+        if (RtlCompareUnicodeString(
+            &tempDevice->AttachedDevice->DriverObject->DriverName,
+            &classDriverName,
+            TRUE) == 0) {
+            targetDevice = tempDevice->AttachedDevice;
+            break;
+        }
+        tempDevice = tempDevice->AttachedDevice;
+    }
+    
+    if (!targetDevice) {
+        return STATUS_NOT_FOUND;
+    }
+    
+    // 获取驱动范围
+    PVOID driverStart = ClassDriverObject->DriverStart;
+    ULONG driverSize = ClassDriverObject->DriverSize;
+    
+    // 搜索设备扩展
+    PUCHAR deviceExt = (PUCHAR)tempDevice->DeviceExtension;
+    const ULONG MAX_SEARCH_SIZE = 4096;  // 最大搜索范围
+    
+    __try {
+        for (ULONG i = 0; i < MAX_SEARCH_SIZE; i++, deviceExt++) {
+            // 验证内存访问
+            if (!MmIsAddressValid(deviceExt)) {
+                break;
+            }
+            
+            PVOID value = *(PVOID*)deviceExt;
+            
+            // 检查是否找到目标
+            if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+                if (g_KoMCallBack.KdbDeviceObject && g_KoMCallBack.KeyboardClassServiceCallback) {
+                    status = STATUS_SUCCESS;
+                    break;
+                }
+                
+                if (value == targetDevice) {
+                    g_KoMCallBack.KdbDeviceObject = targetDevice;
+                    continue;
+                }
+            } else {
+                if (g_KoMCallBack.MouDeviceObject && g_KoMCallBack.MouseClassServiceCallback) {
+                    status = STATUS_SUCCESS;
+                    break;
+                }
+                
+                if (value == targetDevice) {
+                    g_KoMCallBack.MouDeviceObject = targetDevice;
+                    continue;
+                }
+            }
+            
+            // 验证回调函数地址
+            if (value > driverStart && 
+                value < (PVOID)((PUCHAR)driverStart + driverSize) &&
+                MmIsAddressValid(value)) {
+                if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+                    g_KoMCallBack.KeyboardClassServiceCallback = (MY_KEYBOARDCALLBACK)value;
+                } else {
+                    g_KoMCallBack.MouseClassServiceCallback = (MY_MOUSECALLBACK)value;
+                }
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        KdPrint(("Exception occurred while searching device extension: 0x%X\n", 
+            GetExceptionCode()));
+        return STATUS_UNSUCCESSFUL;
+    }
+    
+    return status;
+}
+
+// 替换原有的搜索函数
+NTSTATUS SearchServiceFromKdbExt(PDRIVER_OBJECT KbdDriverObject, PDEVICE_OBJECT pPortDev)
+{
+    return SearchDeviceExtension(KbdDriverObject, pPortDev, DEVICE_TYPE_KM_KEYBOARD);
+}
+
+NTSTATUS SearchServiceFromMouExt(PDRIVER_OBJECT MouDriverObject, PDEVICE_OBJECT pPortDev)
+{
+    return SearchDeviceExtension(MouDriverObject, pPortDev, DEVICE_TYPE_KM_MOUSE);
+}
 
 //////////////////////////////////////////////////////////////////////////
 #ifdef __cplusplus
@@ -363,389 +624,4 @@ NTSTATUS GetKmclassInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
         kmDeviceObject = kmDeviceObject->NextDevice;
     }
     return STATUS_UNSUCCESSFUL;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-NTSTATUS  SearchMouServiceCallBack(IN PDRIVER_OBJECT DriverObject)
-{
-    //定义用到的一组全局变量，这些变量大多数是顾名思义的  
-    NTSTATUS status = STATUS_SUCCESS;
-    UNICODE_STRING uniNtNameString;
-    PDEVICE_OBJECT pTargetDeviceObject = NULL;
-    PDRIVER_OBJECT KbdDriverObject = NULL;
-    PDRIVER_OBJECT KbdhidDriverObject = NULL;
-    PDRIVER_OBJECT Kbd8042DriverObject = NULL;
-    PDRIVER_OBJECT UsingDriverObject = NULL;
-    PDEVICE_OBJECT UsingDeviceObject = NULL;
-
-    PVOID UsingDeviceExt = NULL;
-
-    //这里的代码用来打开USB键盘端口驱动的驱动对象  
-    RtlInitUnicodeString(&uniNtNameString, L"\\Driver\\mouhid");
-    status = ObReferenceObjectByName(&uniNtNameString,
-        OBJ_CASE_INSENSITIVE, NULL, 0,
-        *IoDriverObjectType,
-        KernelMode,
-        NULL,
-        (PVOID*)&KbdhidDriverObject);
-    if (!NT_SUCCESS(status))
-    {
-        KdPrint(("Couldn't get the USB Mouse Object\n"));
-    }
-    else
-    {
-        ObDereferenceObject(KbdhidDriverObject);
-        KdPrint(("get the USB Mouse Object\n"));
-    }
-    //打开PS/2键盘的驱动对象  
-    RtlInitUnicodeString(&uniNtNameString, L"\\Driver\\i8042prt");
-    status = ObReferenceObjectByName(&uniNtNameString,
-        OBJ_CASE_INSENSITIVE,
-        NULL, 0,
-        *IoDriverObjectType,
-        KernelMode,
-        NULL,
-        (PVOID*)&Kbd8042DriverObject);
-    if (!NT_SUCCESS(status))
-    {
-        KdPrint(("Couldn't get the PS/2 Mouse Object %08x\n", status));
-    }
-    else
-    {
-        ObDereferenceObject(Kbd8042DriverObject);
-        KdPrint(("get the PS/2 Mouse Object\n"));
-    }
-    //如果两个设备都没有找到  
-    if (!Kbd8042DriverObject && !KbdhidDriverObject)
-    {
-        return STATUS_SUCCESS;
-    }
-    //如果USB键盘和PS/2键盘同时存在，使用USB鼠标
-    if (KbdhidDriverObject)
-    {
-        UsingDriverObject = KbdhidDriverObject;
-    }
-    else
-    {
-        UsingDriverObject = Kbd8042DriverObject;
-    }
-    RtlInitUnicodeString(&uniNtNameString, L"\\Driver\\mouclass");
-    status = ObReferenceObjectByName(&uniNtNameString,
-        OBJ_CASE_INSENSITIVE, NULL,
-        0,
-        *IoDriverObjectType,
-        KernelMode,
-        NULL,
-        (PVOID*)&KbdDriverObject);
-    if (!NT_SUCCESS(status))
-    {
-        //如果没有成功，直接返回即可  
-        KdPrint(("MyAttach: Coundn't get the Mouse driver Object\n"));
-        return STATUS_UNSUCCESSFUL;
-    }
-    else
-    {
-        ObDereferenceObject(KbdDriverObject);
-    }
-    //遍历KbdDriverObject下的设备对象 
-    UsingDeviceObject = UsingDriverObject->DeviceObject;
-    while (UsingDeviceObject)
-    {
-        status = SearchServiceFromMouExt(KbdDriverObject, UsingDeviceObject);
-        if (status == STATUS_SUCCESS)
-        {
-            break;
-        }
-        UsingDeviceObject = UsingDeviceObject->NextDevice;
-    }
-    if (g_KoMCallBack.MouDeviceObject && g_KoMCallBack.MouseClassServiceCallback)
-    {
-        KdPrint(("Find MouseClassServiceCallback\n"));
-    }
-    return status;
-}
-
-
-NTSTATUS SearchServiceFromMouExt(PDRIVER_OBJECT MouDriverObject, PDEVICE_OBJECT pPortDev)
-{
-    PDEVICE_OBJECT pTargetDeviceObject = NULL;
-    UCHAR* DeviceExt;
-    int i = 0;
-    NTSTATUS status;
-    PVOID KbdDriverStart;
-    ULONG KbdDriverSize = 0;
-    PDEVICE_OBJECT  pTmpDev;
-    UNICODE_STRING  kbdDriName;
-
-    KbdDriverStart = MouDriverObject->DriverStart;
-    KbdDriverSize = MouDriverObject->DriverSize;
-
-    status = STATUS_UNSUCCESSFUL;
-
-    RtlInitUnicodeString(&kbdDriName, L"\\Driver\\mouclass");
-    pTmpDev = pPortDev;
-    while (pTmpDev->AttachedDevice != NULL)
-    {
-        KdPrint(("Att:  0x%x", pTmpDev->AttachedDevice));
-        KdPrint(("Dri Name : %wZ", &pTmpDev->AttachedDevice->DriverObject->DriverName));
-        if (RtlCompareUnicodeString(&pTmpDev->AttachedDevice->DriverObject->DriverName,
-            &kbdDriName, TRUE) == 0)
-        {
-            KdPrint(("Find Object Device: "));
-            break;
-        }
-        pTmpDev = pTmpDev->AttachedDevice;
-    }
-    if (pTmpDev->AttachedDevice == NULL)
-    {
-        return status;
-    }
-    pTargetDeviceObject = MouDriverObject->DeviceObject;
-    while (pTargetDeviceObject)
-    {
-        if (pTmpDev->AttachedDevice != pTargetDeviceObject)
-        {
-            pTargetDeviceObject = pTargetDeviceObject->NextDevice;
-            continue;
-        }
-        DeviceExt = (UCHAR*)pTmpDev->DeviceExtension;
-        g_KoMCallBack.MouDeviceObject = NULL;
-        //遍历我们先找到的端口驱动的设备扩展的每一个指针  
-        for (i = 0; i < 4096; i++, DeviceExt++)
-        {
-            PVOID tmp;
-            if (!MmIsAddressValid(DeviceExt))
-            {
-                break;
-            }
-            //找到后会填写到��个全局变量中，这里检查是否已经填好了  
-            //如果已经填好了就不用继续找了，可以直接退出  
-            if (g_KoMCallBack.MouDeviceObject && g_KoMCallBack.MouseClassServiceCallback)
-            {
-                status = STATUS_SUCCESS;
-                break;
-            }
-            //在端口驱动的设备扩展里，找到了类驱动设备对象，填好类驱动设备对象后继续  
-            tmp = *(PVOID*)DeviceExt;
-            if (tmp == pTargetDeviceObject)
-            {
-                g_KoMCallBack.MouDeviceObject = pTargetDeviceObject;
-                continue;
-            }
-
-            //如果在设备扩展中找到一个地址位于KbdClass这个驱动中，就可以认为，这就是我们要找的回调函数  
-            if ((tmp > KbdDriverStart) && (tmp < (UCHAR*)KbdDriverStart + KbdDriverSize) &&
-                (MmIsAddressValid(tmp)))
-            {
-                //将这个回调函数记录下来  
-                g_KoMCallBack.MouseClassServiceCallback = (MY_MOUSECALLBACK)tmp;
-                //g_KoMCallBack.MouSerCallAddr = (PVOID *)DeviceExt;
-                status = STATUS_SUCCESS;
-            }
-        }
-        if (status == STATUS_SUCCESS)
-        {
-            break;
-        }
-        //换成下一个设备，继续遍历  
-        pTargetDeviceObject = pTargetDeviceObject->NextDevice;
-    }
-    return status;
-}
-
-
-
-NTSTATUS SearchServiceFromKdbExt(PDRIVER_OBJECT KbdDriverObject, PDEVICE_OBJECT pPortDev)
-{
-    PDEVICE_OBJECT pTargetDeviceObject = NULL;
-    UCHAR* DeviceExt;
-    int i = 0;
-    NTSTATUS status;
-    PVOID KbdDriverStart;
-    ULONG KbdDriverSize = 0;
-    PDEVICE_OBJECT  pTmpDev;
-    UNICODE_STRING  kbdDriName;
-
-    KbdDriverStart = KbdDriverObject->DriverStart;
-    KbdDriverSize = KbdDriverObject->DriverSize;
-
-    status = STATUS_UNSUCCESSFUL;
-
-    RtlInitUnicodeString(&kbdDriName, L"\\Driver\\kbdclass");
-    pTmpDev = pPortDev;
-    while (pTmpDev->AttachedDevice != NULL)
-    {
-        KdPrint(("Att:  0x%x", pTmpDev->AttachedDevice));
-        KdPrint(("Dri Name : %wZ", &pTmpDev->AttachedDevice->DriverObject->DriverName));
-        if (RtlCompareUnicodeString(&pTmpDev->AttachedDevice->DriverObject->DriverName,
-            &kbdDriName, TRUE) == 0)
-        {
-            break;
-        }
-        pTmpDev = pTmpDev->AttachedDevice;
-    }
-    if (pTmpDev->AttachedDevice == NULL)
-    {
-        return status;
-    }
-
-    pTargetDeviceObject = KbdDriverObject->DeviceObject;
-    while (pTargetDeviceObject)
-    {
-        if (pTmpDev->AttachedDevice != pTargetDeviceObject)
-        {
-            pTargetDeviceObject = pTargetDeviceObject->NextDevice;
-            continue;
-        }
-        DeviceExt = (UCHAR*)pTmpDev->DeviceExtension;
-        g_KoMCallBack.KdbDeviceObject = NULL;
-        //遍历我们先找到的端口驱动的设备扩展的每一个指针  
-        for (i = 0; i < 4096; i++, DeviceExt++)
-        {
-            PVOID tmp;
-            if (!MmIsAddressValid(DeviceExt))
-            {
-                break;
-            }
-            //找到后会填写到这个全局变量中，这里检查是否已经填好了  
-            //如果已经填好了就不用继续找了，可以直接退出  
-            if (g_KoMCallBack.KdbDeviceObject && g_KoMCallBack.KeyboardClassServiceCallback)
-            {
-                status = STATUS_SUCCESS;
-                break;
-            }
-            //在端口驱动的设备扩展里，找到了类驱动设备对象，填好类驱动设备对象后继续  
-            tmp = *(PVOID*)DeviceExt;
-            if (tmp == pTargetDeviceObject)
-            {
-                g_KoMCallBack.KdbDeviceObject = pTargetDeviceObject;
-                continue;
-            }
-
-            //如果在设备扩展中找到一个地址位于KbdClass这个驱动中，就可以认为，这就是我们要找的回调函数  
-            if ((tmp > KbdDriverStart) && (tmp < (UCHAR*)KbdDriverStart + KbdDriverSize) &&
-                (MmIsAddressValid(tmp)))
-            {
-                //将这个回调函数记录下来  
-                g_KoMCallBack.KeyboardClassServiceCallback = (MY_KEYBOARDCALLBACK)tmp;
-            }
-        }
-        if (status == STATUS_SUCCESS)
-        {
-            break;
-        }
-        //换成下一个设备，继续遍历  
-        pTargetDeviceObject = pTargetDeviceObject->NextDevice;
-    }
-    return status;
-}
-NTSTATUS  SearchKdbServiceCallBack(IN PDRIVER_OBJECT DriverObject)
-{
-    //定义用到的一组全局变量，这些变量大多数是顾名思义的  
-    NTSTATUS status = STATUS_SUCCESS;
-    UNICODE_STRING uniNtNameString;
-    PDEVICE_OBJECT pTargetDeviceObject = NULL;
-    PDRIVER_OBJECT KbdDriverObject = NULL;
-    PDRIVER_OBJECT KbdhidDriverObject = NULL;
-    PDRIVER_OBJECT Kbd8042DriverObject = NULL;
-    PDRIVER_OBJECT UsingDriverObject = NULL;
-    PDEVICE_OBJECT UsingDeviceObject = NULL;
-
-    PVOID UsingDeviceExt = NULL;
-
-    //这里的代码用来打开USB键盘端口驱动的驱动对象  
-    RtlInitUnicodeString(&uniNtNameString, L"\\Driver\\kbdhid");
-    status = ObReferenceObjectByName(&uniNtNameString,
-        OBJ_CASE_INSENSITIVE, NULL, 0,
-        *IoDriverObjectType,
-        KernelMode,
-        NULL,
-        (PVOID*)&KbdhidDriverObject);
-    if (!NT_SUCCESS(status))
-    {
-        KdPrint(("Couldn't get the USB driver Object\n"));
-    }
-    else
-    {
-        ObDereferenceObject(KbdhidDriverObject);
-        KdPrint(("get the USB driver Object\n"));
-    }
-    //打开PS/2键盘的驱动对象  
-    RtlInitUnicodeString(&uniNtNameString, L"\\Driver\\i8042prt");
-    status = ObReferenceObjectByName(&uniNtNameString,
-        OBJ_CASE_INSENSITIVE,
-        NULL, 0,
-        *IoDriverObjectType,
-        KernelMode,
-        NULL,
-        (PVOID*)&Kbd8042DriverObject);
-    if (!NT_SUCCESS(status))
-    {
-        KdPrint(("Couldn't get the PS/2 driver Object %08x\n", status));
-    }
-    else
-    {
-        ObDereferenceObject(Kbd8042DriverObject);
-        KdPrint(("get the PS/2 driver Object\n"));
-    }
-    //这段代码考虑有一个键盘起作用的情况。如果USB键盘和PS/2键盘同时存在，用PS/2键盘
-    //如果两个设备都没有找到  
-    if (!Kbd8042DriverObject && !KbdhidDriverObject)
-    {
-        return STATUS_SUCCESS;
-    }
-    //找到合适的驱动对象，不管是USB还是PS/2，反正一定要找到一个   
-    UsingDriverObject = Kbd8042DriverObject ? Kbd8042DriverObject : KbdhidDriverObject;
-
-    RtlInitUnicodeString(&uniNtNameString, L"\\Driver\\kbdclass");
-    status = ObReferenceObjectByName(&uniNtNameString,
-        OBJ_CASE_INSENSITIVE, NULL,
-        0,
-        *IoDriverObjectType,
-        KernelMode,
-        NULL,
-        (PVOID*)&KbdDriverObject);
-    if (!NT_SUCCESS(status))
-    {
-        //如果没有成功，直接返回即可  
-        KdPrint(("MyAttach: Couldn't get the kbd driver Object\n"));
-        return STATUS_UNSUCCESSFUL;
-    }
-    else
-    {
-        ObDereferenceObject(KbdDriverObject);
-    }
-
-    //遍历KbdDriverObject下的设备对象 
-    UsingDeviceObject = UsingDriverObject->DeviceObject;
-    while (UsingDeviceObject)
-    {
-        status = SearchServiceFromKdbExt(KbdDriverObject, UsingDeviceObject);
-        if (status == STATUS_SUCCESS)
-        {
-            break;
-        }
-        UsingDeviceObject = UsingDeviceObject->NextDevice;
-    }
-
-    //如果成功找到了，就把这个函数替换成我们自己的回调函数  
-    if (g_KoMCallBack.KdbDeviceObject && g_KoMCallBack.KeyboardClassServiceCallback)
-    {
-        KdPrint(("Find keyboradClassServiceCallback\n"));
-
-
-    }
-    return status;
 }
