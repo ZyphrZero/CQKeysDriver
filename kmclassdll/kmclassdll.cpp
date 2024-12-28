@@ -5,6 +5,10 @@
 #include <conio.h>  
 #include <stdio.h>
 #include <winternl.h>
+#include <atomic>
+#include <algorithm>
+#include <sysinfoapi.h>
+#include <time.h>
 
 typedef LONG NTSTATUS;
 typedef NTSTATUS (WINAPI *pfnRtlGetVersion)(PRTL_OSVERSIONINFOW);
@@ -17,6 +21,48 @@ typedef struct _DLL_SYSTEM_INFO {
 	BOOL Is64BitOS; // 用于区分系统是32位还是64位
 	BOOL Is64BitProcess; // 用于区分进程是32位还是64位
 } DLL_SYSTEM_INFO, *PDLL_SYSTEM_INFO;
+
+// 设备状态枚举扩展
+typedef enum _DEVICE_STATUS {
+	DEVICE_STATUS_UNKNOWN = 0,
+	DEVICE_STATUS_READY = 1,
+	DEVICE_STATUS_ERROR = 2
+} DEVICE_STATUS;
+
+// 设备状态结构体
+typedef struct _DEVICE_STATE_INFO {
+	std::atomic<DEVICE_STATUS> status;
+	std::atomic<ULONGLONG> lastCheckTime;
+} DEVICE_STATE_INFO;
+
+// 全局状态变量
+namespace {
+	DEVICE_STATE_INFO g_DriverState = { DEVICE_STATUS_UNKNOWN, 0 };
+}
+
+// 获取系统时间的辅助函数
+__forceinline ULONGLONG GetSystemTimeMs() {
+	FILETIME ft;
+	ULARGE_INTEGER uli;
+	
+	// 直接获取系统时间，精度更高
+	GetSystemTimeAsFileTime(&ft);
+	
+	// 转换为64位整数以便计算
+	uli.LowPart = ft.dwLowDateTime;
+	uli.HighPart = ft.dwHighDateTime;
+	
+	// 从1601年到1970年的100纳秒数
+	// Windows文件时间从1601年开始
+	// Unix时间戳从1970年开始
+	// 需要减去这段差值
+	const ULONGLONG EPOCH_DIFFERENCE = 116444736000000000ull;
+	
+	// 转换为Unix时间戳（毫秒）
+	// 1. 减去时间差
+	// 2. 除以10000转换为毫秒（因为FILETIME是100纳秒为单位）
+	return (uli.QuadPart - EPOCH_DIFFERENCE) / 10000;
+}
 
 // 获取系统信息
 BOOL GetSystemInfo(PDLL_SYSTEM_INFO pSysInfo) 
@@ -103,10 +149,10 @@ BOOL CheckSystemCompatibility()
 #endif
 
 
-//装载NT驱动程序
+// 装载NT驱动程序
 HANDLE drvhandle;
 extern "C" __declspec(dllexport) void __cdecl SetHandle();
-//extern "C" __declspec(dllexport) void __cdecl SetHandle(HANDLE handle);
+// extern "C" __declspec(dllexport) void __cdecl SetHandle(HANDLE handle);
 extern "C" __declspec(dllexport) void __cdecl KeyDown(USHORT VirtualKey);
 extern "C" __declspec(dllexport) void __cdecl KeyUp(USHORT VirtualKey);
 extern "C" __declspec(dllexport) void __cdecl MouseLeftButtonDown();
@@ -124,60 +170,51 @@ extern "C" __declspec(dllexport) void __cdecl MouseXButton1Up();
 extern "C" __declspec(dllexport) void __cdecl MouseXButton2Down();
 extern "C" __declspec(dllexport) void __cdecl MouseXButton2Up();
 
-// 设备状态枚举
-typedef enum _DEVICE_STATUS {
-	DEVICE_STATUS_UNKNOWN = 0,
-	DEVICE_STATUS_READY = 1,
-	DEVICE_STATUS_ERROR = 2,
-	DEVICE_STATUS_DISCONNECTED = 3
-} DEVICE_STATUS;
-
-// 设备状态检测函数
-DEVICE_STATUS CheckDeviceStatus(HANDLE deviceHandle) 
+// 检查驱动状态
+DEVICE_STATUS CheckDriverStatus(HANDLE deviceHandle) 
 {
 	if (deviceHandle == INVALID_HANDLE_VALUE || deviceHandle == NULL) {
-		return DEVICE_STATUS_DISCONNECTED;
+		return DEVICE_STATUS_ERROR;
 	}
 
-	// 尝试与设备通信
+	// 尝试与驱动通信
 	DWORD bytesReturned = 0;
 	if (!DeviceIoControl(deviceHandle, 
-		IOCTL_KEYBOARD,  // 使用一个无害的IOCTL来测试设备
+		IOCTL_KEYBOARD,  // 任意一个IOCTL都可以用来测试驱动状态
 		NULL, 0,
 		NULL, 0,
 		&bytesReturned,
 		NULL)) 
 	{
-		DWORD error = GetLastError();
-		if (error == ERROR_DEVICE_NOT_CONNECTED) {
-			return DEVICE_STATUS_DISCONNECTED;
-		}
 		return DEVICE_STATUS_ERROR;
 	}
 
 	return DEVICE_STATUS_READY;
 }
 
-// 打印设备状态信息
-void PrintDeviceStatus(DEVICE_STATUS status) 
+// 导出函数：检查驱动状态
+extern "C" __declspec(dllexport) void __cdecl CheckDeviceStatus()
 {
-	switch (status) {
-		case DEVICE_STATUS_READY:
-			printf("Device Status: Ready\n");
-			break;
-		case DEVICE_STATUS_ERROR:
-			printf("Device Status: Error\n");
-			break;
-		case DEVICE_STATUS_DISCONNECTED:
-			printf("Device Status: Disconnected\n");
-			break;
-		default:
-			printf("Device Status: Unknown\n");
-			break;
-	}
+	ULONGLONG currentTime = GetSystemTimeMs();
+	
+	// 检查驱动状态
+	g_DriverState.status = CheckDriverStatus(drvhandle);
+	g_DriverState.lastCheckTime = currentTime;
 }
 
-// 修改SetHandle函数以包含状态检测
+// 导出函数：获取驱动状态
+extern "C" __declspec(dllexport) DEVICE_STATUS __cdecl GetDriverStatus()
+{
+	return g_DriverState.status;
+}
+
+// 导出函数：获取上次检查时间
+extern "C" __declspec(dllexport) ULONGLONG __cdecl GetLastCheckTime()
+{
+	return g_DriverState.lastCheckTime;
+}
+
+// 修改SetHandle函数
 void SetHandle()
 {
 	drvhandle = CreateFileA(
@@ -189,41 +226,40 @@ void SetHandle()
 		0,
 		0);
 
-	// 检查设备状态
-	DEVICE_STATUS status = CheckDeviceStatus(drvhandle);
-	PrintDeviceStatus(status);
+	// 初始化驱动状态
+	CheckDeviceStatus();
 	
-	if (status != DEVICE_STATUS_READY) {
-		printf("Warning: Device not ready, operation may fail\n");
-	}
+	// 打印初始状态
+	printf("Driver Status: %d\n", (int)g_DriverState.status.load());
 }
 
-//void SetHandle(HANDLE handle)
-//{
-//	drvhandle = handle;
-//}
+// 内联辅助函数
+__forceinline bool IsKeyboardReady() {
+	return g_DriverState.status == DEVICE_STATUS_READY;
+}
+
+__forceinline bool IsMouseReady() {
+	return g_DriverState.status == DEVICE_STATUS_READY;
+}
 
 
-// 按键按下
+// 键盘按下
 void __cdecl KeyDown(USHORT VirtualKey)
 {
-	// 检查设备状态
-	if (CheckDeviceStatus(drvhandle) != DEVICE_STATUS_READY) {
-		printf("Error: Device not ready, cannot perform key operation\n");
+	if (!IsKeyboardReady()) {
 		return;
 	}
 
-	KEYBOARD_INPUT_DATA  kid;
+	KEYBOARD_INPUT_DATA kid;
 	DWORD dwOutput;
 	memset(&kid, 0, sizeof(KEYBOARD_INPUT_DATA));
 	kid.Flags = KEY_DOWN;
 	kid.MakeCode = (USHORT)MapVirtualKey(VirtualKey, 0);
 
 	DeviceIoControl(drvhandle, IOCTL_KEYBOARD, &kid, sizeof(KEYBOARD_INPUT_DATA), NULL, 0, &dwOutput, NULL);
-
 }
 
-
+// 键盘抬起
 void __cdecl KeyUp(USHORT VirtualKey)
 {
 	KEYBOARD_INPUT_DATA  kid;
@@ -236,16 +272,22 @@ void __cdecl KeyUp(USHORT VirtualKey)
 
 }
 
-
+// 鼠标左键按下
 void __cdecl MouseLeftButtonDown()
 {
-	MOUSE_INPUT_DATA  mid;
+	if (!IsMouseReady()) {
+		return;
+	}
+
+	MOUSE_INPUT_DATA mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_LEFT_BUTTON_DOWN;
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+
+// 鼠标左键抬起
 void __cdecl MouseLeftButtonUp()
 {
 	MOUSE_INPUT_DATA  mid;
@@ -254,6 +296,8 @@ void __cdecl MouseLeftButtonUp()
 	mid.ButtonFlags = MOUSE_LEFT_BUTTON_UP;
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
+
+// 鼠标右键按下
 void __cdecl MouseRightButtonDown()
 {
 	MOUSE_INPUT_DATA  mid;
@@ -263,6 +307,7 @@ void __cdecl MouseRightButtonDown()
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+// 鼠标右键抬起
 void __cdecl MouseRightButtonUp()
 {
 	MOUSE_INPUT_DATA  mid;
@@ -272,6 +317,7 @@ void __cdecl MouseRightButtonUp()
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+// 鼠标中键按下
 void __cdecl MouseMiddleButtonDown()
 {
 	MOUSE_INPUT_DATA  mid;
@@ -281,6 +327,7 @@ void __cdecl MouseMiddleButtonDown()
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+// 鼠标中键抬起
 void __cdecl MouseMiddleButtonUp()
 {
 	MOUSE_INPUT_DATA  mid;
@@ -290,6 +337,7 @@ void __cdecl MouseMiddleButtonUp()
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+// 鼠标相对移动
 void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
 {
 	MOUSE_INPUT_DATA  mid;
@@ -300,6 +348,8 @@ void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
 	mid.LastY = dy;
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
+
+// 鼠标绝对移动
 void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy)
 {
 	MOUSE_INPUT_DATA  mid;
@@ -311,6 +361,7 @@ void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy)
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+// 鼠标XButton1按下
 void __cdecl MouseXButton1Down()
 {
 	MOUSE_INPUT_DATA  mid;
@@ -320,6 +371,7 @@ void __cdecl MouseXButton1Down()
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+// 鼠标XButton1抬起
 void __cdecl MouseXButton1Up()
 {
 	MOUSE_INPUT_DATA  mid;
@@ -329,6 +381,7 @@ void __cdecl MouseXButton1Up()
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+// 鼠标XButton2按下
 void __cdecl MouseXButton2Down()
 {
 	MOUSE_INPUT_DATA  mid;
@@ -338,6 +391,7 @@ void __cdecl MouseXButton2Down()
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+// 鼠标XButton2抬起
 void __cdecl MouseXButton2Up()
 {
 	MOUSE_INPUT_DATA  mid;
@@ -347,42 +401,54 @@ void __cdecl MouseXButton2Up()
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+// 装载驱动程序
 BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 {
+	BOOL bRet = FALSE;
+	SC_HANDLE hServiceMgr = NULL;
+	SC_HANDLE hServiceDDK = NULL;
+	const DWORD START_TIMEOUT = 3000; // 启动超时时间(毫秒)
+	
+	// 1. 快速检查系统兼容性
 	if (!CheckSystemCompatibility()) {
 		printf("System compatibility check failed\n");
 		return FALSE;
 	}
 	
-	//char szDriverImagePath[256];
-	//得到完整的驱动路径
-	//GetFullPathNameA(lpszDriverPath, 256, szDriverImagePath, NULL);
-
-	BOOL bRet = FALSE;
-
-	SC_HANDLE hServiceMgr = NULL;//SCM管理器的句柄
-	SC_HANDLE hServiceDDK = NULL;//NT驱动程序的服务句柄
-
-	//打开服务控制管理器
+	// 2. 打开服务管理器
 	hServiceMgr = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-
-	if (hServiceMgr == NULL)
-	{
-		//OpenSCManager失败
-		printf("OpenSCManager() Faild %d ! \n", GetLastError());
-		bRet = FALSE;
-		goto BeforeLeave;
+	if (!hServiceMgr) {
+		printf("OpenSCManager() Failed: %d\n", GetLastError());
+		return FALSE;
 	}
-	else
-	{
-		////OpenSCManager成功
-		printf("OpenSCManager() ok ! \n");
+	
+	// 3. 尝试打开已存在的服务
+	hServiceDDK = OpenServiceA(hServiceMgr, lpszDriverName, SERVICE_ALL_ACCESS);
+	if (hServiceDDK) {
+		// 服务已存在，尝试直接启动
+		SERVICE_STATUS status;
+		QueryServiceStatus(hServiceDDK, &status);
+		
+		if (status.dwCurrentState == SERVICE_RUNNING) {
+			printf("Service is already running\n");
+			bRet = TRUE;
+			goto cleanup;
+		}
+		
+		// 停止服务以确保清洁状态
+		ControlService(hServiceDDK, SERVICE_CONTROL_STOP, &status);
+		Sleep(100); // 简短等待
+		
+		// 删除现有服务
+		DeleteService(hServiceDDK);
+		CloseServiceHandle(hServiceDDK);
+		hServiceDDK = NULL;
 	}
-
-	//创建驱动所对应的服务
+	
+	// 4. 创建新服务
 	hServiceDDK = CreateServiceA(
 		hServiceMgr,
-		lpszDriverName,        //驱动程序的在注册表中的名字  
+		lpszDriverName,        // 驱动程序的在注册表中的名字  
 		lpszDriverName,        // 注册表驱动程序的 DisplayName 值  
 		SERVICE_ALL_ACCESS,    // 加载驱动程序的访问权限  
 		SERVICE_KERNEL_DRIVER, // 表示加载的服务是驱动程序  
@@ -395,154 +461,143 @@ BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 		NULL,                  // ServiceStartName
 		NULL                   // Password
 	);
-
-	DWORD dwRtn;
-	//判断服务是否失败
-	if (hServiceDDK == NULL)
-	{
-		dwRtn = GetLastError();
-		if (dwRtn != ERROR_IO_PENDING && dwRtn != ERROR_SERVICE_EXISTS)
-		{
-			//由于其他原因创建服务失败
-			printf("CrateService() Faild %d ! \n", dwRtn);
-			bRet = FALSE;
-			goto BeforeLeave;
-		}
-		else
-		{
-			//服务创建失败，是由于服务已经创立过
-			printf("CrateService() Faild Service is ERROR_IO_PENDING or ERROR_SERVICE_EXISTS! \n");
-		}
-
-		// 驱动程序已经加载，只需要打开  
-		hServiceDDK = OpenServiceA(hServiceMgr, lpszDriverName, SERVICE_ALL_ACCESS);
-		if (hServiceDDK == NULL)
-		{
-			//如果打开服务也失败，则意味错误
-			dwRtn = GetLastError();
-			printf("OpenService() Faild %d ! \n", dwRtn);
-			bRet = FALSE;
-			goto BeforeLeave;
-		}
-		else
-		{
-			printf("OpenService() ok ! \n");
-		}
+	
+	if (!hServiceDDK) {
+		printf("Create service failed: %d\n", GetLastError());
+		goto cleanup;
 	}
-	else
-	{
-		printf("CrateService() ok ! \n");
-	}
-
-	//开启此项服务
-	bRet = StartService(hServiceDDK, NULL, NULL);
-	if (!bRet)
-	{
-		DWORD dwRtn = GetLastError();
-		if (dwRtn != ERROR_IO_PENDING && dwRtn != ERROR_SERVICE_ALREADY_RUNNING)
-		{
-			printf("StartService() Faild %d ! \n", dwRtn);
-			bRet = FALSE;
-			goto BeforeLeave;
+	
+	// 5. 启动服务
+	if (!StartService(hServiceDDK, 0, NULL)) {
+		DWORD error = GetLastError();
+		if (error == ERROR_SERVICE_ALREADY_RUNNING) {
+			printf("Service is already running\n");
+			bRet = TRUE;
+		} else {
+			printf("Start service failed: %d\n", error);
 		}
-		else
-		{
-			if (dwRtn == ERROR_IO_PENDING)
-			{
-				//设备被挂住
-				printf("StartService() Faild ERROR_IO_PENDING ! \n");
-				bRet = FALSE;
-				goto BeforeLeave;
-			}
-			else
-			{
-				//服务已经开启
-				printf("StartService() Faild ERROR_SERVICE_ALREADY_RUNNING ! \n");
-				bRet = TRUE;
-				goto BeforeLeave;
-			}
-		}
+		goto cleanup;
 	}
-	bRet = TRUE;
-	//离开前关闭句柄
-BeforeLeave:
-	if (hServiceDDK)
-	{
+	
+	// 6. 等待服务启动完成
+	SERVICE_STATUS status;
+	DWORD startTime = GetTickCount();
+	while (TRUE) {
+		if (!QueryServiceStatus(hServiceDDK, &status)) {
+			break;
+		}
+		
+		if (status.dwCurrentState == SERVICE_RUNNING) {
+			printf("Service start success!\n");
+			bRet = TRUE;
+			break;
+		}
+		
+		if (GetTickCount() - startTime > START_TIMEOUT) {
+			printf("Service start timeout!\n");
+			break;
+		}
+		
+		Sleep(50); // 短暂等待
+	}
+	
+cleanup:
+	if (hServiceDDK) {
 		CloseServiceHandle(hServiceDDK);
 	}
-	if (hServiceMgr)
-	{
+	if (hServiceMgr) {
 		CloseServiceHandle(hServiceMgr);
 	}
 	return bRet;
 }
 
-//卸载驱动程序  
+// 卸载驱动程序  
 BOOL __cdecl UnloadNTDriver(char* szSvrName)
 {
 	BOOL bRet = FALSE;
-	SC_HANDLE hServiceMgr = NULL;//SCM管理器的句柄
-	SC_HANDLE hServiceDDK = NULL;//NT驱动程序的服务句柄
-	SERVICE_STATUS SvrSta;
-	ZeroMemory(&SvrSta, sizeof(SERVICE_STATUS));  // 使用ZeroMemory初始化结构体
-	//打开SCM管理器
+	SC_HANDLE hServiceMgr = NULL;	// SCM管理器的句柄
+	SC_HANDLE hServiceDDK = NULL;	// NT驱动程序的服务句柄
+	SERVICE_STATUS status;		// 服务状态
+	const DWORD STOP_TIMEOUT = 3000; // 停止超时时间(毫秒)
+	
+	// 1. 关闭设备句柄并重置状态
+	if (drvhandle != INVALID_HANDLE_VALUE && drvhandle != NULL) {
+		CloseHandle(drvhandle);
+		drvhandle = INVALID_HANDLE_VALUE;
+	}
+	g_DriverState.status = DEVICE_STATUS_UNKNOWN;
+	
+	// 2. 打开服务管理器
 	hServiceMgr = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-	if (hServiceMgr == NULL)
-	{
-		//带开SCM管理器失败
-		printf("OpenSCManager() Faild %d ! \n", GetLastError());
-		bRet = FALSE;
-		goto BeforeLeave;
+	if (!hServiceMgr) {
+		printf("OpenSCManager() Failed: %d\n", GetLastError());
+		return FALSE;
 	}
-	else
-	{
-		//带开SCM管理器失败成功
-		printf("OpenSCManager() ok ! \n");
-	}
-	//打开驱动所对应的服务
+	printf("OpenSCManager() ok ! \n");
+	
+	// 3. 打开服务
 	hServiceDDK = OpenServiceA(hServiceMgr, szSvrName, SERVICE_ALL_ACCESS);
-
-	if (hServiceDDK == NULL)
-	{
-		//打开驱动所对应的服务失败
-		printf("OpenService() Faild %d ! \n", GetLastError());
-		bRet = FALSE;
-		goto BeforeLeave;
+	if (!hServiceDDK) {
+		DWORD error = GetLastError();
+		if (error == ERROR_SERVICE_DOES_NOT_EXIST) {
+			printf("Service does not exist, considering unload successful\n");
+			bRet = TRUE;
+		} else {
+			printf("Open service failed: %d\n", error);
+		}
+		goto cleanup;
 	}
-	else
-	{
-		printf("OpenService() ok ! \n");
+	
+	// 4. 获取服务状态
+	if (!QueryServiceStatus(hServiceDDK, &status)) {
+		printf("Get service status failed: %d\n", GetLastError());
+		goto cleanup;
 	}
-	//停止驱动程序，如果停止失败，只有重新启动才能，再动态加载。  
-	if (!ControlService(hServiceDDK, SERVICE_CONTROL_STOP, &SvrSta))
-	{
-		printf("ControlService() Faild %d !\n", GetLastError());
+	
+	// 5. 如果服务正在运行，尝试停止
+	if (status.dwCurrentState != SERVICE_STOPPED) {
+		// 发送停止信号
+		if (!ControlService(hServiceDDK, SERVICE_CONTROL_STOP, &status)) {
+			DWORD error = GetLastError();
+			if (error != ERROR_SERVICE_NOT_ACTIVE) {
+				printf("Stop service failed: %d\n", error);
+				goto cleanup;
+			}
+		}
+		
+		// 等待服务停止
+		DWORD startTime = GetTickCount();
+		while (status.dwCurrentState != SERVICE_STOPPED) {
+			Sleep(50); // 短暂等待
+			
+			if (!QueryServiceStatus(hServiceDDK, &status)) {
+				break;
+			}
+			
+			if (GetTickCount() - startTime > STOP_TIMEOUT) {
+				printf("Stop service timeout\n");
+				goto cleanup;
+			}
+		}
 	}
-	else
-	{
-		//打开驱动所对应的失败
-		printf("ControlService() ok !\n");
+	
+	// 6. 删除服务
+	if (!DeleteService(hServiceDDK)) {
+		DWORD error = GetLastError();
+		if (error != ERROR_SERVICE_MARKED_FOR_DELETE) {
+			printf("Delete service failed: %d\n", error);
+			goto cleanup;
+		}
 	}
-	//动态卸载驱动程序。  
-	if (!DeleteService(hServiceDDK))
-	{
-		//卸载失败
-		printf("DeleteSrevice() Faild %d !\n", GetLastError());
-	}
-	else
-	{
-		//卸载成功
-		printf("DelServer:DeleteSrevice() ok !\n");
-	}
+	
+	printf("Service unload success!\n");
 	bRet = TRUE;
-BeforeLeave:
-	//离开前关闭打开的句柄
-	if (hServiceDDK)
-	{
+	
+cleanup:
+	if (hServiceDDK) {
 		CloseServiceHandle(hServiceDDK);
 	}
-	if (hServiceMgr)
-	{
+	if (hServiceMgr) {
 		CloseServiceHandle(hServiceMgr);
 	}
 	return bRet;

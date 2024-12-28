@@ -584,10 +584,38 @@ cleanup:
 
 void kmclassUnload(IN PDRIVER_OBJECT DriverObject)
 {
-    UNICODE_STRING Win32Device;
-    RtlInitUnicodeString(&Win32Device, KEYMOUSE_DOS_DEVICE_NAME);
-    IoDeleteSymbolicLink(&Win32Device);
-    IoDeleteDevice(DriverObject->DeviceObject);
+    UNICODE_STRING win32Device;
+    PDEVICE_OBJECT deviceObject = DriverObject->DeviceObject;
+    LARGE_INTEGER interval;
+
+    KdPrint(("开始卸载驱动...\n"));
+
+    // 1. 删除符号链接
+    RtlInitUnicodeString(&win32Device, KEYMOUSE_DOS_DEVICE_NAME);
+    IoDeleteSymbolicLink(&win32Device);
+
+    // 2. 等待100ms确保没有新的IRP
+    interval.QuadPart = -1000000; // 100ms in 100ns units
+    KeDelayExecutionThread(KernelMode, FALSE, &interval);
+
+    if (deviceObject != NULL) {
+        // 3. 清理设备扩展
+        PDEVICE_EXTENSION deviceExtension = (PDEVICE_EXTENSION)deviceObject->DeviceExtension;
+        if (deviceExtension != NULL) {
+            deviceExtension->kbdDeviceObject = NULL;
+            deviceExtension->mouDeviceObject = NULL;
+            deviceExtension->My_KbdCallback = NULL;
+            deviceExtension->My_MouCallback = NULL;
+        }
+
+        // 4. 清理全局回调对象
+        g_KoMCallBack.Clear();
+
+        // 5. 删除设备对象
+        IoDeleteDevice(deviceObject);
+    }
+
+    KdPrint(("驱动卸载完成\n"));
 }
 
 NTSTATUS GetKmclassInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
