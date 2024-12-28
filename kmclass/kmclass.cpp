@@ -204,7 +204,6 @@ cleanup:
     return status;
 }
 
-// 修改原有的搜索函数调用新的统一搜索函数
 NTSTATUS SearchKdbServiceCallBack(IN PDRIVER_OBJECT DriverObject)
 {
     return SearchDeviceCallback(DEVICE_TYPE_KM_KEYBOARD);
@@ -317,7 +316,6 @@ NTSTATUS SearchDeviceExtension(
     return status;
 }
 
-// 替换原有的搜索函数
 NTSTATUS SearchServiceFromKdbExt(PDRIVER_OBJECT KbdDriverObject, PDEVICE_OBJECT pPortDev)
 {
     return SearchDeviceExtension(KbdDriverObject, pPortDev, DEVICE_TYPE_KM_KEYBOARD);
