@@ -220,97 +220,145 @@ NTSTATUS SearchDeviceExtension(
     PDEVICE_OBJECT PortDevice,
     DEVICE_TYPE_KM DeviceType)
 {
-    if (!ClassDriverObject || !PortDevice) {
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    
+    // 1. 参数验证
+    if (!ClassDriverObject || !PortDevice || !MmIsAddressValid(PortDevice)) {
+        KdPrint(("Invalid parameters in SearchDeviceExtension\n"));
         return STATUS_INVALID_PARAMETER;
     }
 
-    NTSTATUS status = STATUS_UNSUCCESSFUL;
-    PDEVICE_OBJECT targetDevice = NULL;
-    PDEVICE_OBJECT tempDevice = PortDevice;
-    UNICODE_STRING classDriverName;
-    
-    // 设置类驱动名称
-    if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
-        RtlInitUnicodeString(&classDriverName, L"\\Driver\\kbdclass");
-    } else {
-        RtlInitUnicodeString(&classDriverName, L"\\Driver\\mouclass");
-    }
-    
-    // 使用链表遍历算法
-    while (tempDevice->AttachedDevice != NULL) {
-        // 检查是否是目标类驱动
-        if (RtlCompareUnicodeString(
-            &tempDevice->AttachedDevice->DriverObject->DriverName,
-            &classDriverName,
-            TRUE) == 0) {
-            targetDevice = tempDevice->AttachedDevice;
-            break;
-        }
-        tempDevice = tempDevice->AttachedDevice;
-    }
-    
-    if (!targetDevice) {
-        return STATUS_NOT_FOUND;
-    }
-    
-    // 获取驱动范围
-    PVOID driverStart = ClassDriverObject->DriverStart;
-    ULONG driverSize = ClassDriverObject->DriverSize;
-    
-    // 搜索设备扩展
-    PUCHAR deviceExt = (PUCHAR)tempDevice->DeviceExtension;
-    const ULONG MAX_SEARCH_SIZE = 4096;  // 最大搜索范围
-    
     __try {
-        // 使用分层线性扫描算法
-        for (ULONG i = 0; i < MAX_SEARCH_SIZE; i++, deviceExt++) {
-            // 1. 内存安全检查
-            if (!MmIsAddressValid(deviceExt)) break;
-
-            // 2. 内存访问保护，获取当前位置的值
-            PVOID value = *(PVOID*)deviceExt;
+        PDEVICE_OBJECT targetDevice = NULL;
+        PDEVICE_OBJECT tempDevice = PortDevice;
+        UNICODE_STRING classDriverName;
+        
+        // 2. 设置类驱动名称
+        if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+            RtlInitUnicodeString(&classDriverName, L"\\Driver\\kbdclass");
+        } else {
+            RtlInitUnicodeString(&classDriverName, L"\\Driver\\mouclass");
+        }
+        
+        // 3. 安全遍历设备栈
+        while (tempDevice && MmIsAddressValid(tempDevice)) {
+            // 检查AttachedDevice
+            if (!tempDevice->AttachedDevice || !MmIsAddressValid(tempDevice->AttachedDevice)) {
+                break;
+            }
             
-            // 3. 设备对象匹配
+            // 检查DriverObject
+            if (!tempDevice->AttachedDevice->DriverObject || 
+                !MmIsAddressValid(tempDevice->AttachedDevice->DriverObject)) {
+                break;
+            }
+            
+            // 检查驱动名称
+            if (RtlCompareUnicodeString(
+                &tempDevice->AttachedDevice->DriverObject->DriverName,
+                &classDriverName,
+                TRUE) == 0) {
+                targetDevice = tempDevice->AttachedDevice;
+                break;
+            }
+            tempDevice = tempDevice->AttachedDevice;
+        }
+        
+        if (!targetDevice) {
+            KdPrint(("Target device not found\n"));
+            return STATUS_NOT_FOUND;
+        }
+        
+        // 4. 验证驱动范围
+        if (!ClassDriverObject->DriverStart || !ClassDriverObject->DriverSize) {
+            KdPrint(("Invalid driver range\n"));
+            return STATUS_INVALID_PARAMETER;
+        }
+        
+        PVOID driverStart = ClassDriverObject->DriverStart;
+        ULONG driverSize = ClassDriverObject->DriverSize;
+        
+        // 5. 验证设备扩展
+        if (!tempDevice->DeviceExtension || !MmIsAddressValid(tempDevice->DeviceExtension)) {
+            KdPrint(("Invalid device extension\n"));
+            return STATUS_INVALID_PARAMETER;
+        }
+        
+        // 6. 搜索设备扩展
+        PUCHAR deviceExt = (PUCHAR)tempDevice->DeviceExtension;
+        const ULONG MAX_SEARCH_SIZE = 4096;
+        BOOLEAN foundCallback = FALSE;
+        
+        for (ULONG i = 0; i < MAX_SEARCH_SIZE; i++, deviceExt++) {
+            // 内存访问保护
+            if (!MmIsAddressValid(deviceExt) || !MmIsAddressValid(deviceExt + sizeof(PVOID) - 1)) {
+                break;
+            }
+            
+            // 获取当前值
+            PVOID value = *(PVOID*)deviceExt;
+            if (!value || !MmIsAddressValid(value)) {
+                continue;
+            }
+            
+            // 设备对象匹配
             if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
-                // 4. 检查是否已经找到设备对象和回调函数
-                if (g_KoMCallBack.KdbDeviceObject && g_KoMCallBack.KeyboardClassServiceCallback) {
-                    status = STATUS_SUCCESS;
-                    break;
-                }
-                
-                // 5. 设备对象匹配
                 if (value == targetDevice) {
                     g_KoMCallBack.KdbDeviceObject = targetDevice;
                     continue;
                 }
-            } else {
-                if (g_KoMCallBack.MouDeviceObject && g_KoMCallBack.MouseClassServiceCallback) {
+                
+                // 验证回调函数
+                if (value > driverStart && 
+                    value < (PVOID)((PUCHAR)driverStart + driverSize) &&
+                    MmIsAddressValid(value)) {
+                    g_KoMCallBack.KeyboardClassServiceCallback = (MY_KEYBOARDCALLBACK)value;
+                    foundCallback = TRUE;
+                }
+                
+                // 检查是否找到所需信息
+                if (g_KoMCallBack.KdbDeviceObject && foundCallback) {
                     status = STATUS_SUCCESS;
                     break;
                 }
-                
+            } else {
                 if (value == targetDevice) {
                     g_KoMCallBack.MouDeviceObject = targetDevice;
                     continue;
                 }
-            }
-            
-            // 6. 验证是否为回调函数
-            if (value > driverStart && 
-                value < (PVOID)((PUCHAR)driverStart + driverSize) &&
-                MmIsAddressValid(value)) {
-                // 7. 记录回调函数
-                if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
-                    g_KoMCallBack.KeyboardClassServiceCallback = (MY_KEYBOARDCALLBACK)value;
-                } else {
+                
+                // 验证回调函数
+                if (value > driverStart && 
+                    value < (PVOID)((PUCHAR)driverStart + driverSize) &&
+                    MmIsAddressValid(value)) {
                     g_KoMCallBack.MouseClassServiceCallback = (MY_MOUSECALLBACK)value;
+                    foundCallback = TRUE;
+                }
+                
+                // 检查是否找到所需信息
+                if (g_KoMCallBack.MouDeviceObject && foundCallback) {
+                    status = STATUS_SUCCESS;
+                    break;
                 }
             }
         }
+        
+        // 7. 验证结果
+        if (NT_SUCCESS(status)) {
+            if (DeviceType == DEVICE_TYPE_KM_KEYBOARD) {
+                if (!g_KoMCallBack.KdbDeviceObject || !g_KoMCallBack.KeyboardClassServiceCallback) {
+                    status = STATUS_UNSUCCESSFUL;
+                }
+            } else {
+                if (!g_KoMCallBack.MouDeviceObject || !g_KoMCallBack.MouseClassServiceCallback) {
+                    status = STATUS_UNSUCCESSFUL;
+                }
+            }
+        }
+        
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        KdPrint(("Exception occurred while searching device extension: 0x%X\n", 
-            GetExceptionCode()));
-        return STATUS_UNSUCCESSFUL;
+        KdPrint(("Exception in SearchDeviceExtension: 0x%X\n", GetExceptionCode()));
+        status = STATUS_UNSUCCESSFUL;
     }
     
     return status;
@@ -330,22 +378,23 @@ NTSTATUS SearchServiceFromMouExt(PDRIVER_OBJECT MouDriverObject, PDEVICE_OBJECT 
 #ifdef __cplusplus
 extern "C"
 #endif
-NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING  RegistryPath)
+NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath)
 {
-    UNICODE_STRING     DeviceName, Win32Device;
-    PDEVICE_OBJECT     DeviceObject = NULL;
-    NTSTATUS           status;
-    SYSTEM_VERSION_INFO versionInfo;
+    UNICODE_STRING deviceName, win32Device;
+    PDEVICE_OBJECT deviceObject = NULL;
+    NTSTATUS status;
+    BOOLEAN symbolicLinkCreated = FALSE;
     
-    // 获取系统版本信息
+    // 1. 获取系统版本信息
+    SYSTEM_VERSION_INFO versionInfo;
     status = GetSystemVersionInfo(&versionInfo);
     if (!NT_SUCCESS(status)) {
         KdPrint(("Failed to get system version info: 0x%08X\n", status));
         return status;
     }
     
-    // 检查系统版本兼容性
-    if (versionInfo.MajorVersion < 6) {  // 低于Windows Vista
+    // 2. 检查系统版本兼容性
+    if (versionInfo.MajorVersion < 6) {
         KdPrint(("Unsupported Windows version: %d.%d\n", 
             versionInfo.MajorVersion, versionInfo.MinorVersion));
         return STATUS_NOT_SUPPORTED;
@@ -357,57 +406,96 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING  Registr
         versionInfo.BuildNumber,
         versionInfo.Is64Bit ? "64-bit" : "32-bit"));
 
-    RtlInitUnicodeString(&DeviceName, KEYMOUSE_DEVICE_NAME);
-    RtlInitUnicodeString(&Win32Device, KEYMOUSE_DOS_DEVICE_NAME);
+    __try {
+        // 3. 初始化设备名称
+        RtlInitUnicodeString(&deviceName, KEYMOUSE_DEVICE_NAME);
+        RtlInitUnicodeString(&win32Device, KEYMOUSE_DOS_DEVICE_NAME);
 
-    for (ULONG i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
-        DriverObject->MajorFunction[i] = kmclassDefaultHandler;
+        // 4. 设置分发函数
+        for (ULONG i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++) {
+            DriverObject->MajorFunction[i] = kmclassDefaultHandler;
+        }
 
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = kmclassCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = kmclassCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = kmclassDispatchDeviceControl;
+        DriverObject->MajorFunction[IRP_MJ_CREATE] = kmclassCreateClose;
+        DriverObject->MajorFunction[IRP_MJ_CLOSE] = kmclassCreateClose;
+        DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = kmclassDispatchDeviceControl;
+        DriverObject->DriverUnload = kmclassUnload;
 
-    DriverObject->DriverUnload = kmclassUnload;
-    status = IoCreateDevice(DriverObject, sizeof(DEVICE_EXTENSION), &DeviceName, FILE_DEVICE_KEYMOUSE, 0, TRUE, &DeviceObject);
+        // 5. 创建设备对象
+        status = IoCreateDevice(
+            DriverObject,
+            sizeof(DEVICE_EXTENSION),
+            &deviceName,
+            FILE_DEVICE_KEYMOUSE,
+            0,
+            TRUE,
+            &deviceObject);
 
-    if (!NT_SUCCESS(status))
-        return status;
-    if (!DeviceObject)
-        return STATUS_UNEXPECTED_IO_ERROR;
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("Failed to create device: 0x%08X\n", status));
+            return status;
+        }
 
-    DeviceObject->Flags |= DO_DIRECT_IO;
-    DeviceObject->AlignmentRequirement = FILE_WORD_ALIGNMENT;
-    status = IoCreateSymbolicLink(&Win32Device, &DeviceName);
+        if (!deviceObject) {
+            KdPrint(("Device object is NULL\n"));
+            return STATUS_UNEXPECTED_IO_ERROR;
+        }
 
-    //    status = GetKmclassInfo(DeviceObject, KEYBOARD_DEVICE);
-    status = SearchKdbServiceCallBack(DriverObject);
-    if (!NT_SUCCESS(status))
-    {
-        KdPrint(("KEYBOARD_DEVICE ERROR, error = 0x%08lx\n", status));
-        return status;
+        // 6. 设置设备标志
+        deviceObject->Flags |= DO_DIRECT_IO;
+        deviceObject->AlignmentRequirement = FILE_WORD_ALIGNMENT;
+
+        // 7. 创建符号链接
+        status = IoCreateSymbolicLink(&win32Device, &deviceName);
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("Failed to create symbolic link: 0x%08X\n", status));
+            goto cleanup;
+        }
+        symbolicLinkCreated = TRUE;
+
+        // 8. 搜索键盘设备
+        status = SearchKdbServiceCallBack(DriverObject);
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("Failed to find keyboard device: 0x%08X\n", status));
+            goto cleanup;
+        }
+
+        // 9. 搜索鼠标设备
+        status = SearchMouServiceCallBack(DriverObject);
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("Failed to find mouse device: 0x%08X\n", status));
+            goto cleanup;
+        }
+
+        // 10. 根据系统版本调整设备标志
+        deviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+        
+        if (versionInfo.MajorVersion >= 10) {
+            deviceObject->Flags |= DO_POWER_PAGABLE;
+        }
+        
+        if (versionInfo.Is64Bit) {
+            deviceObject->AlignmentRequirement = FILE_64_BYTE_ALIGNMENT;
+        }
+
+        KdPrint(("Driver initialized successfully\n"));
+        return STATUS_SUCCESS;
+
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        KdPrint(("Exception in DriverEntry: 0x%X\n", GetExceptionCode()));
+        status = STATUS_UNSUCCESSFUL;
     }
 
-    //    status = GetKmclassInfo(DeviceObject, MOUSE_DEVICE);
-    status = SearchMouServiceCallBack(DriverObject);
-    if (!NT_SUCCESS(status))
-    {
-        KdPrint(("MOUSE_DEVICE ERROR, error = 0x%08lx\n", status));
-        return status;
+cleanup:
+    if (!NT_SUCCESS(status)) {
+        if (symbolicLinkCreated) {
+            IoDeleteSymbolicLink(&win32Device);
+        }
+        if (deviceObject) {
+            IoDeleteDevice(deviceObject);
+        }
     }
-
-    DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
-
-    // 根据系统版本调整驱动行为
-    if (versionInfo.MajorVersion >= 10) {  // Windows 10及以上
-        DeviceObject->Flags |= DO_POWER_PAGABLE;
-    }
-    
-    if (versionInfo.Is64Bit) {
-        // 64位系统特定处理
-        DeviceObject->AlignmentRequirement = FILE_64_BYTE_ALIGNMENT;
-    }
-
-    return STATUS_SUCCESS;
+    return status;
 }
 
 void kmclassUnload(IN PDRIVER_OBJECT DriverObject)
@@ -611,7 +699,7 @@ NTSTATUS GetKmclassInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
                         kmDeviceExtension[i + 1] > (ULONG)kmDriverStart &&
                         kmDeviceExtension[i + 1] < (ULONG)kmDriverStart + kmDriverSize)
                     {
-                        // 将获取到的设备对象保存到自定义扩展设备结构
+                        // 将获取到��设备对象保存到自定义扩展设备结构
                         *TargetDeviceObject = (PVOID)kmDeviceExtension[i];
                         *TargetclassCallback = (PVOID)kmDeviceExtension[i + 1];
                         KdPrint(("%SDeviceObject == 0x%x\n", kmName, kmDeviceExtension[i]));
