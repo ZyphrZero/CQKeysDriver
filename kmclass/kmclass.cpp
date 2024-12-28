@@ -2,6 +2,37 @@
 #include "kmclass.h"
 #include "common.h"
 
+// 系统版本信息结构
+typedef struct _SYSTEM_VERSION_INFO {
+    ULONG MajorVersion;    // 主版本号
+    ULONG MinorVersion;    // 次版本号
+    ULONG BuildNumber;     // 构建号
+    BOOLEAN Is64Bit;       // 是否64位系统
+} SYSTEM_VERSION_INFO, *PSYSTEM_VERSION_INFO;
+
+// 获取系统版本信息
+NTSTATUS GetSystemVersionInfo(PSYSTEM_VERSION_INFO VersionInfo) 
+{
+    RTL_OSVERSIONINFOEXW osVersionInfo = { 0 };
+    osVersionInfo.dwOSVersionInfoSize = sizeof(RTL_OSVERSIONINFOEXW);
+    
+    NTSTATUS status = RtlGetVersion((PRTL_OSVERSIONINFOW)&osVersionInfo);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    VersionInfo->MajorVersion = osVersionInfo.dwMajorVersion;
+    VersionInfo->MinorVersion = osVersionInfo.dwMinorVersion;
+    VersionInfo->BuildNumber = osVersionInfo.dwBuildNumber;
+    
+#ifdef _WIN64
+    VersionInfo->Is64Bit = TRUE;
+#else
+    VersionInfo->Is64Bit = FALSE;
+#endif
+    
+    return STATUS_SUCCESS;
+}
 
 typedef struct _DEVICE_EXTENSION {
 
@@ -41,7 +72,27 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING  Registr
     UNICODE_STRING     DeviceName, Win32Device;
     PDEVICE_OBJECT     DeviceObject = NULL;
     NTSTATUS           status;
-
+    SYSTEM_VERSION_INFO versionInfo;
+    
+    // 获取系统版本信息
+    status = GetSystemVersionInfo(&versionInfo);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("Failed to get system version info: 0x%08X\n", status));
+        return status;
+    }
+    
+    // 检查系统版本兼容性
+    if (versionInfo.MajorVersion < 6) {  // 低于Windows Vista
+        KdPrint(("Unsupported Windows version: %d.%d\n", 
+            versionInfo.MajorVersion, versionInfo.MinorVersion));
+        return STATUS_NOT_SUPPORTED;
+    }
+    
+    KdPrint(("Windows Version: %d.%d.%d (%s)\n", 
+        versionInfo.MajorVersion, 
+        versionInfo.MinorVersion,
+        versionInfo.BuildNumber,
+        versionInfo.Is64Bit ? "64-bit" : "32-bit"));
 
     RtlInitUnicodeString(&DeviceName, KEYMOUSE_DEVICE_NAME);
     RtlInitUnicodeString(&Win32Device, KEYMOUSE_DOS_DEVICE_NAME);
@@ -82,6 +133,16 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING  Registr
     }
 
     DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+    // 根据系统版本调整驱动行为
+    if (versionInfo.MajorVersion >= 10) {  // Windows 10及以上
+        DeviceObject->Flags |= DO_POWER_PAGABLE;
+    }
+    
+    if (versionInfo.Is64Bit) {
+        // 64位系统特定处理
+        DeviceObject->AlignmentRequirement = FILE_64_BYTE_ALIGNMENT;
+    }
 
     return STATUS_SUCCESS;
 }
@@ -469,7 +530,7 @@ NTSTATUS SearchServiceFromMouExt(PDRIVER_OBJECT MouDriverObject, PDEVICE_OBJECT 
             {
                 break;
             }
-            //找到后会填写到这个全局变量中，这里检查是否已经填好了  
+            //找到后会填写到��个全局变量中，这里检查是否已经填好了  
             //如果已经填好了就不用继续找了，可以直接退出  
             if (g_KoMCallBack.MouDeviceObject && g_KoMCallBack.MouseClassServiceCallback)
             {
@@ -659,7 +720,7 @@ NTSTATUS  SearchKdbServiceCallBack(IN PDRIVER_OBJECT DriverObject)
     if (!NT_SUCCESS(status))
     {
         //如果没有成功，直接返回即可  
-        KdPrint(("MyAttach: Coundn't get the kbd driver Object\n"));
+        KdPrint(("MyAttach: Couldn't get the kbd driver Object\n"));
         return STATUS_UNSUCCESSFUL;
     }
     else

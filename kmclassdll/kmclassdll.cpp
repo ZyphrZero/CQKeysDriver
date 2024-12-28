@@ -4,8 +4,99 @@
 #include <winsvc.h>  
 #include <conio.h>  
 #include <stdio.h>
+#include <winternl.h>
 
+typedef LONG NTSTATUS;
+typedef NTSTATUS (WINAPI *pfnRtlGetVersion)(PRTL_OSVERSIONINFOW);
 
+// 系统版本信息结构
+typedef struct _DLL_SYSTEM_INFO {
+	DWORD MajorVersion; // 主版本号
+	DWORD MinorVersion; // 次版本号
+	DWORD BuildNumber; // 构建号
+	BOOL Is64BitOS; // 用于区分系统是32位还是64位
+	BOOL Is64BitProcess; // 用于区分进程是32位还是64位
+} DLL_SYSTEM_INFO, *PDLL_SYSTEM_INFO;
+
+// 获取系统信息
+BOOL GetSystemInfo(PDLL_SYSTEM_INFO pSysInfo) 
+{
+	SYSTEM_INFO si;
+	GetNativeSystemInfo(&si);
+	
+	OSVERSIONINFOEXW osvi = { sizeof(osvi) };
+	HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+	if (!hNtdll) return FALSE;
+	
+	pfnRtlGetVersion RtlGetVersion = (pfnRtlGetVersion)GetProcAddress(hNtdll, "RtlGetVersion");
+	if (!RtlGetVersion) return FALSE;
+	
+	RtlGetVersion((PRTL_OSVERSIONINFOW)&osvi);
+	
+	pSysInfo->MajorVersion = osvi.dwMajorVersion;
+	pSysInfo->MinorVersion = osvi.dwMinorVersion;
+	pSysInfo->BuildNumber = osvi.dwBuildNumber;
+	
+	// 检查是否64位操作系统
+	typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS) (HANDLE, PBOOL);
+	LPFN_ISWOW64PROCESS fnIsWow64Process = (LPFN_ISWOW64PROCESS)
+		GetProcAddress(GetModuleHandle(TEXT("kernel32")), "IsWow64Process");
+	
+	if (fnIsWow64Process) {
+		BOOL bIsWow64 = FALSE;
+		if (fnIsWow64Process(GetCurrentProcess(), &bIsWow64)) {
+			pSysInfo->Is64BitOS = (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) || bIsWow64;
+		}
+	}
+	
+#ifdef _WIN64
+	pSysInfo->Is64BitProcess = TRUE;
+#else
+	pSysInfo->Is64BitProcess = FALSE;
+#endif
+	
+	return TRUE;
+}
+
+// 检查系统兼容性
+BOOL CheckSystemCompatibility() 
+{
+	DLL_SYSTEM_INFO sysInfo;
+	if (!GetSystemInfo(&sysInfo)) {
+		printf("Failed to get system information\n");
+		return FALSE;
+	}
+	
+	// 检查Windows版本兼容性
+	if (sysInfo.MajorVersion < 6) {  // 低于Windows Vista
+		printf("Unsupported Windows version: %d.%d\n", 
+			sysInfo.MajorVersion, sysInfo.MinorVersion);
+		return FALSE;
+	}
+	
+	// Windows版本特定功能检查
+	if (sysInfo.MajorVersion == 6) {  // Windows Vista/7/8/8.1
+		printf("When running on Windows Vista/7/8/8.1, some advanced features may not be available\n");
+	} else if (sysInfo.MajorVersion == 10) {  // Windows 10/11
+		printf("Running on Windows 10/11, all features are available\n");
+	}
+	
+	// 检查32/64位兼容性
+#ifdef _WIN64
+	if (!sysInfo.Is64BitOS) {
+		printf("64-bit DLL cannot run on 32-bit system\n");
+		return FALSE;
+	}
+#endif
+	
+	printf("System Version: Windows %d.%d.%d (%s)\n",
+		sysInfo.MajorVersion,
+		sysInfo.MinorVersion,
+		sysInfo.BuildNumber,
+		sysInfo.Is64BitOS ? "64-bit" : "32-bit");
+		
+	return TRUE;
+}
 
 #ifdef _MANAGED
 #pragma managed(push, off)
@@ -33,6 +124,60 @@ extern "C" __declspec(dllexport) void __cdecl MouseXButton1Up();
 extern "C" __declspec(dllexport) void __cdecl MouseXButton2Down();
 extern "C" __declspec(dllexport) void __cdecl MouseXButton2Up();
 
+// 设备状态枚举
+typedef enum _DEVICE_STATUS {
+	DEVICE_STATUS_UNKNOWN = 0,
+	DEVICE_STATUS_READY = 1,
+	DEVICE_STATUS_ERROR = 2,
+	DEVICE_STATUS_DISCONNECTED = 3
+} DEVICE_STATUS;
+
+// 设备状态检测函数
+DEVICE_STATUS CheckDeviceStatus(HANDLE deviceHandle) 
+{
+	if (deviceHandle == INVALID_HANDLE_VALUE || deviceHandle == NULL) {
+		return DEVICE_STATUS_DISCONNECTED;
+	}
+
+	// 尝试与设备通信
+	DWORD bytesReturned = 0;
+	if (!DeviceIoControl(deviceHandle, 
+		IOCTL_KEYBOARD,  // 使用一个无害的IOCTL来测试设备
+		NULL, 0,
+		NULL, 0,
+		&bytesReturned,
+		NULL)) 
+	{
+		DWORD error = GetLastError();
+		if (error == ERROR_DEVICE_NOT_CONNECTED) {
+			return DEVICE_STATUS_DISCONNECTED;
+		}
+		return DEVICE_STATUS_ERROR;
+	}
+
+	return DEVICE_STATUS_READY;
+}
+
+// 打印设备状态信息
+void PrintDeviceStatus(DEVICE_STATUS status) 
+{
+	switch (status) {
+		case DEVICE_STATUS_READY:
+			printf("Device Status: Ready\n");
+			break;
+		case DEVICE_STATUS_ERROR:
+			printf("Device Status: Error\n");
+			break;
+		case DEVICE_STATUS_DISCONNECTED:
+			printf("Device Status: Disconnected\n");
+			break;
+		default:
+			printf("Device Status: Unknown\n");
+			break;
+	}
+}
+
+// 修改SetHandle函数以包含状态检测
 void SetHandle()
 {
 	drvhandle = CreateFileA(
@@ -42,7 +187,15 @@ void SetHandle()
 		NULL,
 		OPEN_EXISTING,
 		0,
-		0);;
+		0);
+
+	// 检查设备状态
+	DEVICE_STATUS status = CheckDeviceStatus(drvhandle);
+	PrintDeviceStatus(status);
+	
+	if (status != DEVICE_STATUS_READY) {
+		printf("Warning: Device not ready, operation may fail\n");
+	}
 }
 
 //void SetHandle(HANDLE handle)
@@ -54,6 +207,12 @@ void SetHandle()
 // 按键按下
 void __cdecl KeyDown(USHORT VirtualKey)
 {
+	// 检查设备状态
+	if (CheckDeviceStatus(drvhandle) != DEVICE_STATUS_READY) {
+		printf("Error: Device not ready, cannot perform key operation\n");
+		return;
+	}
+
 	KEYBOARD_INPUT_DATA  kid;
 	DWORD dwOutput;
 	memset(&kid, 0, sizeof(KEYBOARD_INPUT_DATA));
@@ -190,6 +349,11 @@ void __cdecl MouseXButton2Up()
 
 BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 {
+	if (!CheckSystemCompatibility()) {
+		printf("System compatibility check failed\n");
+		return FALSE;
+	}
+	
 	//char szDriverImagePath[256];
 	//得到完整的驱动路径
 	//GetFullPathNameA(lpszDriverPath, 256, szDriverImagePath, NULL);

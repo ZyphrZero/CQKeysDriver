@@ -4,31 +4,23 @@
 
 [Version]
 Signature="$WINDOWS NT$"
-Class=Sample ; TODO: edit Class
-ClassGuid={78A1C341-4539-11d3-B88D-00C04FAD5171} ; TODO: edit ClassGuid
+Class=System ; 改用System类而不是Sample
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318} ; System类的GUID
 Provider=%ManufacturerName%
 CatalogFile=kmclass.cat
-DriverVer= ; TODO: set DriverVer in stampinf property pages
+DriverVer=01/01/2024,1.0.0.1
+PnpLockdown=1
 
 [DestinationDirs]
 DefaultDestDir = 12
 kmclass_Device_CoInstaller_CopyFiles = 11
-
-; ================= Class section =====================
-
-[ClassInstall32]
-Addreg=SampleClassReg
-
-[SampleClassReg]
-HKR,,,0,%ClassName%
-HKR,,Icon,,-5
 
 [SourceDisksNames]
 1 = %DiskName%,,,""
 
 [SourceDisksFiles]
 kmclass.sys  = 1,,
-WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1 ; make sure the number matches with SourceDisksNames
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1
 
 ;*****************************************
 ; Install Section
@@ -38,7 +30,7 @@ WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1 ; make sure the number matches with
 %ManufacturerName%=Standard,NT$ARCH$
 
 [Standard.NT$ARCH$]
-%kmclass.DeviceDesc%=kmclass_Device, Root\kmclass ; TODO: edit hw-id
+%kmclass.DeviceDesc%=kmclass_Device, Root\kmclass
 
 [kmclass_Device.NT]
 CopyFiles=Drivers_Dir
@@ -79,8 +71,7 @@ KmdfLibraryVersion = $KMDFVERSION$
 
 [Strings]
 SPSVCINST_ASSOCSERVICE= 0x00000002
-ManufacturerName="<Your manufacturer name>" ;TODO: Replace with your manufacturer name
-ClassName="Samples" ; TODO: edit ClassName
-DiskName = "kmclass Installation Disk"
-kmclass.DeviceDesc = "kmclass Device"
-kmclass.SVCDESC = "kmclass Service"
+ManufacturerName="KMDLL" 
+DiskName = "KMDLL Installation Disk"
+kmclass.DeviceDesc = "KMDLL Keyboard Mouse Driver"
+kmclass.SVCDESC = "KMDLL Keyboard Mouse Service"
