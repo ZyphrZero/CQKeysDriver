@@ -7,38 +7,42 @@
 #ifndef PCH_H
 #define PCH_H
 
-// stdafx.h : 标准系统包含文件的包含文件，
-// 或是经常使用但不常更改的
-// 特定于项目的包含文件
-//
-
-#pragma once
-
-// 如果必须将位于下面指定平台之前的平台作为目标，请修改下列定义。
-// 有关不同平台对应值的最新信息，请参考 MSDN。
-#ifndef WINVER				// 允许使用特定于 Windows XP 或更高版本的功能。
-#define WINVER 0x0501		// 将此值更改为相应的值，以适用于 Windows 的其他版本。
+// 确保Windows 7或更高版本的API可用
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601  // Windows 7
 #endif
 
-#ifndef _WIN32_WINNT		// 允许使用特定于 Windows XP 或更高版本的功能。
-#define _WIN32_WINNT 0x0501	// 将此值更改为相应的值，以适用于 Windows 的其他版本。
-#endif						
-
-#ifndef _WIN32_WINDOWS		// 允许使用特定于 Windows 98 或更高版本的功能。
-#define _WIN32_WINDOWS 0x0410 // 将此值更改为适当的值，以指定将 Windows Me 或更高版本作为目标。
-#endif
-
-#ifndef _WIN32_IE			// 允许使用特定于 IE 6.0 或更高版本的功能。
-#define _WIN32_IE 0x0600	// 将此值更改为相应的值，以适用于 IE 的其他版本。
-#endif
-
-#define WIN32_LEAN_AND_MEAN		// 从 Windows 头中排除极少使用的资料
-// Windows 头文件:
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellscalingapi.h>
 
+// DPI感知API的定义
+#ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+typedef enum PROCESS_DPI_AWARENESS {
+    PROCESS_DPI_UNAWARE = 0,
+    PROCESS_SYSTEM_DPI_AWARE = 1,
+    PROCESS_PER_MONITOR_DPI_AWARE = 2
+} PROCESS_DPI_AWARENESS;
 
+typedef enum MONITOR_DPI_TYPE {
+    MDT_EFFECTIVE_DPI = 0,
+    MDT_ANGULAR_DPI = 1,
+    MDT_RAW_DPI = 2,
+    MDT_DEFAULT = MDT_EFFECTIVE_DPI
+} MONITOR_DPI_TYPE;
 
-// TODO: 在此处引用程序需要的其他头文件
+DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
 
+#define DPI_AWARENESS_CONTEXT_UNAWARE               ((DPI_AWARENESS_CONTEXT)-1)
+#define DPI_AWARENESS_CONTEXT_SYSTEM_AWARE          ((DPI_AWARENESS_CONTEXT)-2)
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE     ((DPI_AWARENESS_CONTEXT)-3)
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2  ((DPI_AWARENESS_CONTEXT)-4)
+#endif
+
+// 如果编译器找不到这些函数的声明，我们自己声明它们
+#ifndef SHCORE_API
+typedef HRESULT (WINAPI *GETDPIFORMONITOR)(HMONITOR, MONITOR_DPI_TYPE, UINT*, UINT*);
+typedef HRESULT (WINAPI *SETPROCESSDPIAWARENESS)(PROCESS_DPI_AWARENESS);
+#endif
 
 #endif //PCH_H

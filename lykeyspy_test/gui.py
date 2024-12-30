@@ -34,10 +34,16 @@ class LYKeysGUI:
         # 在创建窗口前检查权限
         if not self.check_privileges():
             sys.exit(0)  # 干净地退出程序
-            
+        
+        # 初始化DPI感知
+        self._init_dpi_awareness()
+        
         self.root = tk.Tk()
         self.root.title("键鼠驱动测试工具")
         self.root.geometry("570x750")
+        
+        # 获取DPI缩放比例
+        self.dpi_scale = self._get_dpi_scale()
         
         # 初始化组件
         self.driver_mgr = None  # 驱动管理器
@@ -223,6 +229,61 @@ class LYKeysGUI:
         # 点击频率
         self.click_rate_label = ttk.Label(status_frame, text="平均频率: 0次/秒")
         self.click_rate_label.pack(side=tk.LEFT, padx=20)
+        
+        # 添加鼠标绝对移动测试区域
+        mouse_abs_frame = ttk.LabelFrame(self.root, text="鼠标绝对移动测试", padding="5")
+        mouse_abs_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 坐标输入区域
+        coord_frame = ttk.Frame(mouse_abs_frame)
+        coord_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # X坐标输入
+        ttk.Label(coord_frame, text="X坐标:").grid(row=0, column=0, padx=5)
+        self.x_coord_var = tk.StringVar(value="0")
+        self.x_coord_entry = ttk.Entry(coord_frame, textvariable=self.x_coord_var, width=10)
+        self.x_coord_entry.grid(row=0, column=1, padx=5)
+        
+        # Y坐标输入
+        ttk.Label(coord_frame, text="Y坐标:").grid(row=0, column=2, padx=5)
+        self.y_coord_var = tk.StringVar(value="0")
+        self.y_coord_entry = ttk.Entry(coord_frame, textvariable=self.y_coord_var, width=10)
+        self.y_coord_entry.grid(row=0, column=3, padx=5)
+        
+        # 移动按钮
+        self.move_abs_btn = ttk.Button(coord_frame, text="移动到指定位置", 
+                                      command=self._move_to_position, state=tk.DISABLED)
+        self.move_abs_btn.grid(row=0, column=4, padx=5)
+        
+        # 预设位置测试区域
+        preset_frame = ttk.Frame(mouse_abs_frame)
+        preset_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 预设位置按钮
+        positions = [
+            ("左上角", self._move_top_left, "btn_top_left"),
+            ("右上角", self._move_top_right, "btn_top_right"),
+            ("左下角", self._move_bottom_left, "btn_bottom_left"),
+            ("右下角", self._move_bottom_right, "btn_bottom_right"),
+            ("屏幕中心", self._move_center, "btn_center"),
+            ("自动测试", self._auto_test_absolute_move, "btn_auto_test")
+        ]
+        
+        for i, (text, command, btn_name) in enumerate(positions):
+            btn = ttk.Button(preset_frame, text=text, command=command, state=tk.DISABLED)
+            btn.grid(row=0, column=i, padx=5)
+            # 使用英文属性名保存按钮引用
+            setattr(self, btn_name, btn)
+        
+        # 状态显示区域
+        status_frame = ttk.Frame(mouse_abs_frame)
+        status_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.mouse_pos_label = ttk.Label(status_frame, text="当前位置: (0, 0)")
+        self.mouse_pos_label.pack(side=tk.LEFT, padx=5)
+        
+        self.move_status_label = ttk.Label(status_frame, text="移动状态: 就绪")
+        self.move_status_label.pack(side=tk.LEFT, padx=5)
     
     def _update_button_states(self, driver_loaded):
         """更新按钮状态"""
@@ -237,6 +298,15 @@ class LYKeysGUI:
         self.check_status_btn.config(state=state)
         self.load_btn.config(state=tk.DISABLED if driver_loaded else tk.NORMAL)
         self.rapid_test_btn.config(state=state)
+        
+        # 更新鼠标绝对移动测试按钮状态
+        self.move_abs_btn.config(state=state)
+        self.btn_top_left.config(state=state)
+        self.btn_top_right.config(state=state)
+        self.btn_bottom_left.config(state=state)
+        self.btn_bottom_right.config(state=state)
+        self.btn_center.config(state=state)
+        self.btn_auto_test.config(state=state)
     
     def _load_driver(self):
         """加载驱动"""
@@ -774,6 +844,162 @@ class LYKeysGUI:
         except Exception as e:
             messagebox.showerror("错误", f"权限检查失败: {str(e)}")
             return True  # 出错时也继续运行
+
+    def _init_dpi_awareness(self):
+        """初始化DPI感知设置"""
+        try:
+            # 尝试使用Per-Monitor DPI感知
+            awareness = ctypes.c_int()
+            errorCode = ctypes.windll.shcore.GetProcessDpiAwareness(0, ctypes.byref(awareness))
+            
+            # 如果当前不是Per-Monitor DPI感知，则设置
+            if errorCode == 0 and awareness.value != 2:  # 2 = PROCESS_PER_MONITOR_DPI_AWARE
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception as e:
+            logging.warning(f"设置DPI感知失败: {str(e)}")
+
+    def _get_dpi_scale(self):
+        """获取当前DPI缩放比例"""
+        try:
+            user32 = ctypes.windll.user32
+            user32.SetProcessDPIAware()
+            dpi = user32.GetDpiForSystem()  # 获取系统DPI
+            return dpi / 96.0  # 96 DPI是基准值
+        except Exception as e:
+            logging.warning(f"获取DPI缩放失败: {str(e)}")
+            return 1.0  # 默认返回1.0表示100%缩放
+
+    def _get_screen_metrics(self):
+        """获取屏幕信息（物理像素）"""
+        import ctypes
+        user32 = ctypes.windll.user32
+        
+        # 获取虚拟屏幕的物理尺寸
+        x = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+        y = user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+        width = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+        height = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+        
+        # 添加DPI信息到日志
+        logging.info(f"当前DPI缩放: {self.dpi_scale * 100}%")
+        logging.info(f"虚拟屏幕范围（物理像素）: x={x}, y={y}, width={width}, height={height}")
+        
+        return x, y, width, height
+
+    def _get_logical_coordinates(self, physical_x, physical_y):
+        """将物理坐标转换为逻辑坐标（用于显示）"""
+        return int(physical_x / self.dpi_scale), int(physical_y / self.dpi_scale)
+
+    def _move_to_position(self):
+        """移动到指定坐标（使用物理像素）"""
+        try:
+            # 输入的是逻辑坐标
+            logical_x = int(self.x_coord_var.get())
+            logical_y = int(self.y_coord_var.get())
+            
+            # 转换为物理坐标
+            physical_x = int(logical_x * self.dpi_scale)
+            physical_y = int(logical_y * self.dpi_scale)
+            
+            def move():
+                try:
+                    self.move_status_label.config(text="移动状态: 移动中")
+                    success = self.input_tester.mouse_move_abs(physical_x, physical_y)
+                    status = "成功" if success else "失败"
+                    self.move_status_label.config(text=f"移动状态: 移动{status}")
+                    self.mouse_pos_label.config(text=f"当前位置: ({logical_x}, {logical_y}) [物理: ({physical_x}, {physical_y})]")
+                    logging.info(f"鼠标移动 - 逻辑坐标: ({logical_x}, {logical_y}), 物理坐标: ({physical_x}, {physical_y})")
+                except Exception as e:
+                    self.move_status_label.config(text=f"移动状态: 错误 - {str(e)}")
+                    logging.error(f"鼠标移动出错: {str(e)}")
+            
+            threading.Thread(target=move, daemon=True).start()
+            
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的坐标值")
+
+    def _move_top_left(self):
+        """移动到左上角"""
+        x, y, _, _ = self._get_screen_metrics()
+        logical_x, logical_y = self._get_logical_coordinates(x, y)
+        self.x_coord_var.set(str(logical_x))
+        self.y_coord_var.set(str(logical_y))
+        self._move_to_position()
+
+    def _move_top_right(self):
+        """移动到右上角"""
+        x, y, width, _ = self._get_screen_metrics()
+        logical_x, logical_y = self._get_logical_coordinates(x + width - 1, y)
+        self.x_coord_var.set(str(logical_x))
+        self.y_coord_var.set(str(logical_y))
+        self._move_to_position()
+
+    def _move_bottom_left(self):
+        """移动到左下角"""
+        x, y, _, height = self._get_screen_metrics()
+        logical_x, logical_y = self._get_logical_coordinates(x, y + height - 1)
+        self.x_coord_var.set(str(logical_x))
+        self.y_coord_var.set(str(logical_y))
+        self._move_to_position()
+
+    def _move_bottom_right(self):
+        """移动到右下角"""
+        x, y, width, height = self._get_screen_metrics()
+        logical_x, logical_y = self._get_logical_coordinates(x + width - 1, y + height - 1)
+        self.x_coord_var.set(str(logical_x))
+        self.y_coord_var.set(str(logical_y))
+        self._move_to_position()
+
+    def _move_center(self):
+        """移动到屏幕中心"""
+        x, y, width, height = self._get_screen_metrics()
+        logical_x, logical_y = self._get_logical_coordinates(x + width // 2, y + height // 2)
+        self.x_coord_var.set(str(logical_x))
+        self.y_coord_var.set(str(logical_y))
+        self._move_to_position()
+
+    def _auto_test_absolute_move(self):
+        """自动测试鼠标绝对移动"""
+        def run_test():
+            try:
+                x, y, width, height = self._get_screen_metrics()
+                test_points = [
+                    (x, y, "左上角"),
+                    (x + width - 1, y, "右上角"),
+                    (x, y + height - 1, "左下角"),
+                    (x + width - 1, y + height - 1, "右下角"),
+                    (x + width // 2, y + height // 2, "中心"),
+                    # 添加边界测试点
+                    (x + 1, y + 1, "接近左上角"),
+                    (x + width - 2, y + 1, "接近右上角"),
+                    (x + 1, y + height - 2, "接近左下角"),
+                    (x + width - 2, y + height - 2, "接近右下角"),
+                    # 添加四等分点
+                    (x + width // 4, y + height // 4, "左上四分点"),
+                    (x + width * 3 // 4, y + height // 4, "右上四分点"),
+                    (x + width // 4, y + height * 3 // 4, "左下四分点"),
+                    (x + width * 3 // 4, y + height * 3 // 4, "右下四分点")
+                ]
+                
+                for physical_x, physical_y, position_name in test_points:
+                    if not self.is_driver_loaded:
+                        break
+                        
+                    logical_x, logical_y = self._get_logical_coordinates(physical_x, physical_y)
+                    logging.info(f"测试移动到{position_name}: 逻辑({logical_x}, {logical_y}), 物理({physical_x}, {physical_y})")
+                    self.x_coord_var.set(str(logical_x))
+                    self.y_coord_var.set(str(logical_y))
+                    self._move_to_position()
+                    time.sleep(1)  # 等待移动完成
+                
+                logging.info("自动测试完成")
+                self.move_status_label.config(text="移动状态: 测试完成")
+                
+            except Exception as e:
+                logging.error(f"自动测试出错: {str(e)}")
+                self.move_status_label.config(text=f"移动状态: 测试出错")
+        
+        threading.Thread(target=run_test, daemon=True).start()
 
 if __name__ == '__main__':
     try:

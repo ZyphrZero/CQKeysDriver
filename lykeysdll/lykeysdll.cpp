@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <sysinfoapi.h>
 #include <time.h>
+#include <shellscalingapi.h>
+#pragma comment(lib, "Shcore.lib")
 
 typedef LONG NTSTATUS;
 typedef NTSTATUS (WINAPI *pfnRtlGetVersion)(PRTL_OSVERSIONINFOW);
@@ -214,9 +216,63 @@ extern "C" __declspec(dllexport) ULONGLONG __cdecl GetLastCheckTime()
 	return g_DriverState.lastCheckTime;
 }
 
-// 修改SetHandle函数
+// DPI感知初始化函数
+BOOL InitializeDPIAwareness() {
+	BOOL result = FALSE;
+	HMODULE hShcore = LoadLibraryW(L"Shcore.dll");
+	if (hShcore) {
+		SETPROCESSDPIAWARENESS SetProcessDpiAwarenessFunc = 
+			(SETPROCESSDPIAWARENESS)GetProcAddress(hShcore, "SetProcessDpiAwareness");
+		
+		if (SetProcessDpiAwarenessFunc) {
+			HRESULT hr = SetProcessDpiAwarenessFunc(PROCESS_PER_MONITOR_DPI_AWARE);
+			result = SUCCEEDED(hr);
+		}
+		
+		if (!result) {
+			// 如果失败，尝试使用较旧的API
+			HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+			if (hUser32) {
+				typedef BOOL (WINAPI *SETPROCESSDPIAWARE)();
+				SETPROCESSDPIAWARE SetProcessDPIAwareFunc = 
+					(SETPROCESSDPIAWARE)GetProcAddress(hUser32, "SetProcessDPIAware");
+				
+				if (SetProcessDPIAwareFunc) {
+					result = SetProcessDPIAwareFunc();
+				}
+			}
+		}
+		
+		FreeLibrary(hShcore);
+	}
+	return result;
+}
+
+// 获取显示器DPI的辅助函数
+UINT GetMonitorDPI(POINT pt) {
+	UINT dpiX = 96, dpiY = 96;
+	static GETDPIFORMONITOR GetDpiForMonitorFunc = NULL;
+	
+	if (!GetDpiForMonitorFunc) {
+		HMODULE hShcore = LoadLibraryW(L"Shcore.dll");
+		if (hShcore) {
+			GetDpiForMonitorFunc = (GETDPIFORMONITOR)GetProcAddress(hShcore, "GetDpiForMonitor");
+		}
+	}
+	
+	HMONITOR hMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+	if (hMonitor && GetDpiForMonitorFunc) {
+		GetDpiForMonitorFunc(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
+	}
+	return dpiX;
+}
+
+// 修改SetHandle函数以初始化DPI感知
 void SetHandle()
 {
+	// 初始化DPI感知
+	InitializeDPIAwareness();
+
 	drvhandle = CreateFileA(
 		"\\\\.\\lykeys",
 		GENERIC_WRITE | GENERIC_READ,
@@ -337,6 +393,40 @@ void __cdecl MouseMiddleButtonUp()
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
+// 鼠标绝对移动
+void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy)
+{
+	MOUSE_INPUT_DATA  mid;
+	DWORD dwOutput;
+	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
+	mid.Flags = MOUSE_MOVE_ABSOLUTE;
+
+	// 获取虚拟屏幕信息
+	int virtualScreenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+	int virtualScreenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+	int virtualScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+	int virtualScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+	// 获取目标位置的DPI
+	POINT targetPoint = { dx, dy };
+	UINT dpi = GetMonitorDPI(targetPoint);
+	float dpiScale = dpi / 96.0f;
+
+	// 根据DPI调整输入坐标
+	LONG physicalX = (LONG)(dx * dpiScale);
+	LONG physicalY = (LONG)(dy * dpiScale);
+
+	// 调整输入坐标，考虑虚拟屏幕偏移和DPI
+	LONG adjustedX = std::max<LONG>(0, std::min<LONG>(physicalX - virtualScreenX, virtualScreenWidth));
+	LONG adjustedY = std::max<LONG>(0, std::min<LONG>(physicalY - virtualScreenY, virtualScreenHeight));
+
+	// 将坐标映射到0xFFFF范围，考虑DPI缩放
+	mid.LastX = (LONG)((float)adjustedX * 0xFFFF / (virtualScreenWidth * dpiScale));
+	mid.LastY = (LONG)((float)adjustedY * 0xFFFF / (virtualScreenHeight * dpiScale));
+
+	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+}
+
 // 鼠标相对移动
 void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
 {
@@ -346,18 +436,6 @@ void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
 	mid.Flags = MOUSE_MOVE_RELATIVE;
 	mid.LastX = dx;
 	mid.LastY = dy;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
-}
-
-// 鼠标绝对移动
-void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy)
-{
-	MOUSE_INPUT_DATA  mid;
-	DWORD dwOutput;
-	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
-	mid.Flags = MOUSE_MOVE_ABSOLUTE;
-	mid.LastX = dx * 0xffff / GetSystemMetrics(SM_CXSCREEN);
-	mid.LastY = dy * 0xffff / GetSystemMetrics(SM_CYSCREEN);
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
