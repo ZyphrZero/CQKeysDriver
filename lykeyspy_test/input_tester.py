@@ -63,9 +63,6 @@ class InputTester:
         Returns:
             bool: 操作是否成功
         """
-        if not self._check_device_status():
-            return False
-            
         vk_code = VirtualKeys.get_code(key)
         if vk_code is None:
             logging.error(f"无效的按键: {key}")
@@ -88,9 +85,6 @@ class InputTester:
         Returns:
             bool: 操作是否成功
         """
-        if not self._check_device_status():
-            return False
-            
         vk_code = VirtualKeys.get_code(key)
         if vk_code is None:
             logging.error(f"无效的按键: {key}")
@@ -130,8 +124,6 @@ class InputTester:
         Returns:
             bool: 操作是否成功
         """
-        if not self._check_device_status():
-            return False
         self.driver.MouseMoveRELATIVE(dx, dy)
         return True
     
@@ -145,23 +137,17 @@ class InputTester:
         Returns:
             bool: 操作是否成功
         """
-        if not self._check_device_status():
-            return False
         self.driver.MouseMoveABSOLUTE(x, y)
         return True
     
     # 鼠标左键操作
     def mouse_left_down(self) -> bool:
         """鼠标左键按下"""
-        if not self._check_device_status():
-            return False
         self.driver.MouseLeftButtonDown()
         return True
     
     def mouse_left_up(self) -> bool:
         """鼠标左键释放"""
-        if not self._check_device_status():
-            return False
         self.driver.MouseLeftButtonUp()
         return True
     
@@ -175,15 +161,11 @@ class InputTester:
     # 鼠标右键操作
     def mouse_right_down(self) -> bool:
         """鼠标右键按下"""
-        if not self._check_device_status():
-            return False
         self.driver.MouseRightButtonDown()
         return True
     
     def mouse_right_up(self) -> bool:
         """鼠标右键释放"""
-        if not self._check_device_status():
-            return False
         self.driver.MouseRightButtonUp()
         return True
     
@@ -197,15 +179,11 @@ class InputTester:
     # 鼠标中键操作
     def mouse_middle_down(self) -> bool:
         """鼠标中键按下"""
-        if not self._check_device_status():
-            return False
         self.driver.MouseMiddleButtonDown()
         return True
     
     def mouse_middle_up(self) -> bool:
         """鼠标中键释放"""
-        if not self._check_device_status():
-            return False
         self.driver.MouseMiddleButtonUp()
         return True
     
@@ -219,15 +197,11 @@ class InputTester:
     # 鼠标X1键操作
     def mouse_x1_down(self) -> bool:
         """鼠标X1键按下"""
-        if not self._check_device_status():
-            return False
         self.driver.MouseXButton1Down()
         return True
     
     def mouse_x1_up(self) -> bool:
         """鼠标X1键释放"""
-        if not self._check_device_status():
-            return False
         self.driver.MouseXButton1Up()
         return True
     
@@ -241,15 +215,11 @@ class InputTester:
     # 鼠标X2键操作
     def mouse_x2_down(self) -> bool:
         """鼠标X2键按下"""
-        if not self._check_device_status():
-            return False
         self.driver.MouseXButton2Down()
         return True
     
     def mouse_x2_up(self) -> bool:
         """鼠标X2键释放"""
-        if not self._check_device_status():
-            return False
         self.driver.MouseXButton2Up()
         return True
     
@@ -270,8 +240,6 @@ class InputTester:
         Returns:
             bool: 操作是否成功
         """
-        if not self._check_device_status():
-            return False
         try:
             self.driver.MouseWheelUp(wheel_delta)
             return True
@@ -288,8 +256,6 @@ class InputTester:
         Returns:
             bool: 操作是否成功
         """
-        if not self._check_device_status():
-            return False
         try:
             self.driver.MouseWheelDown(wheel_delta)
             return True
@@ -306,8 +272,6 @@ class InputTester:
         Returns:
             bool: 操作是否成功
         """
-        if not self._check_device_status():
-            return False
         try:
             if delta > 0:
                 return self.mouse_wheel_up(abs(delta))
@@ -315,5 +279,6 @@ class InputTester:
                 return self.mouse_wheel_down(abs(delta))
             return True
         except Exception as e:
-            logging.error(f"滚轮滚动失败: {str(e)}")
+            logging.error
+            (f"滚轮滚动失败: {str(e)}")
             return False 
