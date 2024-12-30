@@ -151,6 +151,11 @@ typedef struct _MOUSE_INPUT_DATA {
 
 // 鼠标滚轮
 #define MOUSE_WHEEL             0x0400
+#define MOUSE_WHEEL_UP         0x0780  // 滚轮向上
+#define MOUSE_WHEEL_DOWN       0x0800  // 滚轮向下
+
+// 滚轮数据
+#define WHEEL_DELTA            120     // 标准滚轮单位
 
 // 定义鼠标指示标志
 #define MOUSE_MOVE_RELATIVE         0  // 相对移动

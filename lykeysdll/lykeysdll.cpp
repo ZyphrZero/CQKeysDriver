@@ -169,6 +169,8 @@ extern "C" __declspec(dllexport) void __cdecl MouseXButton1Down();
 extern "C" __declspec(dllexport) void __cdecl MouseXButton1Up();
 extern "C" __declspec(dllexport) void __cdecl MouseXButton2Down();
 extern "C" __declspec(dllexport) void __cdecl MouseXButton2Up();
+extern "C" __declspec(dllexport) void __cdecl MouseWheelUp(USHORT wheelDelta);
+extern "C" __declspec(dllexport) void __cdecl MouseWheelDown(USHORT wheelDelta);
 
 // 检查驱动状态
 DEVICE_STATUS CheckDriverStatus(HANDLE deviceHandle) 
@@ -214,7 +216,7 @@ extern "C" __declspec(dllexport) ULONGLONG __cdecl GetLastCheckTime()
 	return g_DriverState.lastCheckTime;
 }
 
-// 修改SetHandle函数
+// SetHandle函数
 void SetHandle()
 {
 	drvhandle = CreateFileA(
@@ -356,8 +358,25 @@ void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy)
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.Flags = MOUSE_MOVE_ABSOLUTE;
-	mid.LastX = dx * 0xffff / GetSystemMetrics(SM_CXSCREEN);
-	mid.LastY = dy * 0xffff / GetSystemMetrics(SM_CYSCREEN);
+
+	// 获取虚拟屏幕的尺寸和位置
+	int virtualScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+	int virtualScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+	int virtualScreenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+	int virtualScreenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+	// 将输入坐标调整为相对于虚拟屏幕的坐标
+	LONG adjustedX = dx - virtualScreenX;
+	LONG adjustedY = dy - virtualScreenY;
+
+	// 确保坐标在有效范围内
+	adjustedX = max(0, min(adjustedX, virtualScreenWidth));
+	adjustedY = max(0, min(adjustedY, virtualScreenHeight));
+
+	// 将坐标映射到0xFFFF范围
+	mid.LastX = (LONG)((float)adjustedX * 65535.0f / (float)virtualScreenWidth);
+	mid.LastY = (LONG)((float)adjustedY * 65535.0f / (float)virtualScreenHeight);
+
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
@@ -398,6 +417,28 @@ void __cdecl MouseXButton2Up()
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_BUTTON_5_UP;
+	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+}
+
+// 鼠标滚轮向上
+void __cdecl MouseWheelUp(USHORT wheelDelta)
+{
+	MOUSE_INPUT_DATA  mid;
+	DWORD dwOutput;
+	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
+	mid.ButtonFlags = MOUSE_WHEEL;
+	mid.ButtonData = wheelDelta;
+	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+}
+
+// 鼠标滚轮向下
+void __cdecl MouseWheelDown(USHORT wheelDelta)
+{
+	MOUSE_INPUT_DATA  mid;
+	DWORD dwOutput;
+	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
+	mid.ButtonFlags = MOUSE_WHEEL;
+	mid.ButtonData = (USHORT)(-wheelDelta);  // 负值表示向下滚动
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
