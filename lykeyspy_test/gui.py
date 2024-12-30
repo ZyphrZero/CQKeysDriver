@@ -550,11 +550,16 @@ class LYKeysGUI:
                 result = ""
                 
                 for char in text:
-                    if char.isupper():
+                    if VirtualKeys.needs_shift(char):
+                        # 特殊字符处理
+                        self.input_tester.press_key(char)
+                    elif char.isupper():
+                        # 大写字母处理
                         self.input_tester.key_down('shift')
                         self.input_tester.press_key(char.lower())
                         self.input_tester.key_up('shift')
                     else:
+                        # 普通字符处理
                         self.input_tester.press_key(char)
                     result += char
                     # 更新输出框

@@ -108,10 +108,32 @@ class InputTester:
         Returns:
             bool: 操作是否成功
         """
-        if self.key_down(key):
-            time.sleep(duration)
-            return self.key_up(key)
-        return False
+        try:
+            # 检查是否需要Shift
+            if VirtualKeys.needs_shift(key):
+                # 按下Shift
+                self.key_down('shift')
+                time.sleep(0.01)  # 短暂延时确保Shift按下
+                
+                # 获取对应的基础键码(不含Shift)
+                success = self.key_down(key)
+                if success:
+                    time.sleep(duration)
+                    self.key_up(key)
+                
+                # 释放Shift
+                time.sleep(0.01)  # 短暂延时确保按键动作完成
+                self.key_up('shift')
+                return success
+            else:
+                # 普通按键处理
+                if self.key_down(key):
+                    time.sleep(duration)
+                    return self.key_up(key)
+            return False
+        except Exception as e:
+            logging.error(f"按键操作失败: {str(e)}")
+            return False
     
     # ===== 鼠标操作相关方法 =====
     def mouse_move_rel(self, dx: int, dy: int) -> bool:

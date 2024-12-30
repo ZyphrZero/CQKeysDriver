@@ -17,8 +17,6 @@ class DriverManager:
         if not self.check_and_elevate_privileges():
             raise PermissionError("需要管理员权限")
             
-        self._setup_paths()
-    
     def _setup_paths(self, dll_path=None, sys_path=None):
         """设置驱动路径
         
