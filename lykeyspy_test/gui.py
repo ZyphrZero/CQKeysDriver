@@ -202,6 +202,10 @@ class LYKeysGUI:
         self.test_mouse_btn = ttk.Button(test_frame, text="鼠标测试", command=self._test_mouse, state=tk.DISABLED)
         self.test_mouse_btn.pack(side=tk.LEFT, padx=5)
         
+        # 添加批处理测试按钮
+        self.test_batch_btn = ttk.Button(test_frame, text="批处理测试", command=self._test_batch_input, state=tk.DISABLED)
+        self.test_batch_btn.pack(side=tk.LEFT, padx=5)
+        
         # 高频按键测试区域
         rapid_test_frame = ttk.LabelFrame(self.left_panel, text="高频按键测试", padding="5")
         rapid_test_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -288,6 +292,7 @@ class LYKeysGUI:
         self.test_key_btn.config(state=state)
         self.test_input_btn.config(state=state)
         self.test_mouse_btn.config(state=state)
+        self.test_batch_btn.config(state=state)  # 添加批处理测试按钮状态更新
         self.submit_btn.config(state=state)
         self.clear_btn.config(state=state)
         self.input_entry.config(state=state)
@@ -1074,6 +1079,7 @@ class LYKeysGUI:
 
         # 使用新线程运行滚轮测试，避免阻塞GUI
         threading.Thread(target=run_test, daemon=True).start()
+
 
 if __name__ == '__main__':
     try:

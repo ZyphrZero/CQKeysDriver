@@ -244,34 +244,94 @@ __forceinline bool IsMouseReady() {
 	return g_DriverState.status == DEVICE_STATUS_READY;
 }
 
+#define MAX_BATCH_SIZE 64  // 最大批处理大小
 
-// 键盘按下
+// 批量按键数据结构
+struct KeyBatchData {
+	KEYBOARD_INPUT_DATA data[MAX_BATCH_SIZE];
+	int count;
+};
+
+// 全局批处理缓冲区
+namespace {
+	KeyBatchData g_KeyBatch = { {0}, 0 };
+}
+
+// 批量按键处理函数
+extern "C" __declspec(dllexport) BOOL __cdecl ProcessKeyBatch()
+{
+	if (!IsKeyboardReady() || g_KeyBatch.count == 0) {
+		return FALSE;
+	}
+
+	DWORD dwOutput;
+	BOOL result = DeviceIoControl(
+		drvhandle,
+		IOCTL_KEYBOARD,
+		g_KeyBatch.data,
+		sizeof(KEYBOARD_INPUT_DATA) * g_KeyBatch.count,
+		NULL,
+		0,
+		&dwOutput,
+		NULL
+	);
+
+	g_KeyBatch.count = 0;  // 重置计数
+	return result;
+}
+
+// 添加按键到批处理
+extern "C" __declspec(dllexport) BOOL __cdecl AddKeyToBatch(USHORT VirtualKey, USHORT Flags)
+{
+	if (g_KeyBatch.count >= MAX_BATCH_SIZE) {
+		return FALSE;
+	}
+
+	KEYBOARD_INPUT_DATA& kid = g_KeyBatch.data[g_KeyBatch.count];
+	memset(&kid, 0, sizeof(KEYBOARD_INPUT_DATA));
+	kid.Flags = Flags;
+	kid.MakeCode = (USHORT)MapVirtualKey(VirtualKey, 0);
+	
+	g_KeyBatch.count++;
+	return TRUE;
+}
+
+// 清空批处理缓冲区
+extern "C" __declspec(dllexport) void __cdecl ClearKeyBatch()
+{
+	g_KeyBatch.count = 0;
+}
+
+// 修改原有的KeyDown函数以支持批处理
 void __cdecl KeyDown(USHORT VirtualKey)
 {
 	if (!IsKeyboardReady()) {
 		return;
 	}
 
-	KEYBOARD_INPUT_DATA kid;
-	DWORD dwOutput;
-	memset(&kid, 0, sizeof(KEYBOARD_INPUT_DATA));
-	kid.Flags = KEY_DOWN;
-	kid.MakeCode = (USHORT)MapVirtualKey(VirtualKey, 0);
+	// 如果批处理缓冲区已满，先处理当前批次
+	if (g_KeyBatch.count >= MAX_BATCH_SIZE) {
+		ProcessKeyBatch();
+	}
 
-	DeviceIoControl(drvhandle, IOCTL_KEYBOARD, &kid, sizeof(KEYBOARD_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	// 添加到批处理
+	AddKeyToBatch(VirtualKey, KEY_DOWN);
 }
 
-// 键盘抬起
+// 修改原有的KeyUp函数以支持批处理
 void __cdecl KeyUp(USHORT VirtualKey)
 {
-	KEYBOARD_INPUT_DATA  kid;
-	DWORD dwOutput;
-	memset(&kid, 0, sizeof(KEYBOARD_INPUT_DATA));
-	kid.Flags = KEY_UP;
-	kid.MakeCode = (USHORT)MapVirtualKey(VirtualKey, 0);
+	if (!IsKeyboardReady()) {
+		return;
+	}
 
-	DeviceIoControl(drvhandle, IOCTL_KEYBOARD, &kid, sizeof(KEYBOARD_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	// 如果批处理缓冲区已满，先处理当前批次
+	if (g_KeyBatch.count >= MAX_BATCH_SIZE) {
+		ProcessKeyBatch();
+	}
 
+	// 添加到批处理
+	AddKeyToBatch(VirtualKey, KEY_UP);
 }
 
 // 鼠标左键按下
