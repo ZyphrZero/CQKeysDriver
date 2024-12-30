@@ -35,8 +35,10 @@ class DriverManager:
         if not dll_path or not sys_path:
             logging.info("使用默认驱动路径")
             base_dir = os.path.dirname(os.path.dirname(__file__))
+            # lykeysdll\x64\Debug\lykeysdll.dll
+            # lykeys\x64\Debug\lykeys\lykeys.sys
             self.dll_path = dll_path or os.path.join(base_dir, 'lykeysdll', 'x64', 'Debug', 'lykeysdll.dll')
-            self.sys_path = sys_path or os.path.join(base_dir, 'lykeys', 'x64', 'Debug', 'lykeys.sys')
+            self.sys_path = sys_path or os.path.join(base_dir, 'lykeys', 'x64', 'Debug', 'lykeys', 'lykeys.sys')
         else:
             self.dll_path = dll_path
             self.sys_path = sys_path

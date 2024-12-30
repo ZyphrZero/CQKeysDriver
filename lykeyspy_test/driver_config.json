@@ -1,6 +1,6 @@
 {
-    "dll_path": "C:/Users/cassianvale/Documents/GitHub/KMDLL/lykeysdll/x64/Debug/lykeysdll.dll",
-    "sys_path": "C:/Users/cassianvale/Documents/GitHub/KMDLL/lykeys/x64/Debug/lykeys/lykeys.sys",
+    "dll_path": "",
+    "sys_path": "",
     "rapid_test": {
         "test_key": "a",
         "press_time": "0",
