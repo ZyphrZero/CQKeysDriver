@@ -3,32 +3,6 @@
 
 # 虚拟键码映射
 class VirtualKeys:
-    # 特殊符号映射
-    SYMBOL_MAP = {
-        '!': ('1', True),    # (基础键, 是否需要Shift)
-        '@': ('2', True),
-        '#': ('3', True),
-        '$': ('4', True),
-        '%': ('5', True),
-        '^': ('6', True),
-        '&': ('7', True),
-        '*': ('8', True),
-        '(': ('9', True),
-        ')': ('0', True),
-        '_': ('-', True),
-        '+': ('=', True),
-        '{': ('[', True),
-        '}': (']', True),
-        '|': ('\\', True),
-        ':': (';', True),
-        '"': ("'", True),
-        '<': (',', True),
-        '>': ('.', True),
-        '?': ('/', True),
-        '~': ('`', True),
-        ' ': ('spacebar', False),  # 空格键特殊处理
-    }
-    
     # 基本按键
     VK_CODE = {
         # 控制键
@@ -152,25 +126,12 @@ class VirtualKeys:
     }
     
     @classmethod
-    def get_symbol_keys(cls, symbol):
-        """获取特殊符号对应的按键组合
-        
-        Args:
-            symbol: 要处理的符号
-            
-        Returns:
-            tuple: (base_key, need_shift) 基础键和是否需要Shift
-            None: 如果符号未定义
-        """
-        return cls.SYMBOL_MAP.get(symbol)
-    
-    @classmethod
     def get_code(cls, key):
         """获取虚拟键码，如果不存在返回None"""
         return cls.VK_CODE.get(key.lower())
     
     @classmethod
     def is_valid_key(cls, key):
-        """检查是否是有效的按键或特殊符号"""
-        return key.lower() in cls.VK_CODE or key in cls.SYMBOL_MAP
+        """检查是否是有效的按键"""
+        return key.lower() in cls.VK_CODE
 
