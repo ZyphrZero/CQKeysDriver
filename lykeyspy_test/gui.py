@@ -37,7 +37,23 @@ class LYKeysGUI:
             
         self.root = tk.Tk()
         self.root.title("键鼠驱动测试工具")
-        self.root.geometry("570x750")
+        self.root.geometry("1200x710")  # 增加窗口初始大小
+        
+        # 配置根窗口的grid权重
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=3)  # 左侧控制面板
+        self.root.grid_columnconfigure(1, weight=2)  # 右侧日志区域
+        
+        # 创建左右分栏
+        self.left_panel = ttk.Frame(self.root)
+        self.left_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        
+        self.right_panel = ttk.Frame(self.root)
+        self.right_panel.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        
+        # 配置右侧面板的grid权重
+        self.right_panel.grid_rowconfigure(0, weight=1)
+        self.right_panel.grid_columnconfigure(0, weight=1)
         
         # 初始化组件
         self.driver_mgr = None  # 驱动管理器
@@ -81,26 +97,43 @@ class LYKeysGUI:
             def emit(self, record):
                 if not self.gui.is_closing:  # 只在程序未关闭时输出日志
                     msg = self.format(record) + '\n'
-                    self.text_widget.insert(tk.END, msg)
-                    self.text_widget.see(tk.END)
+                    # 使用after方法确保在主线程中更新UI
+                    self.gui.root.after(0, self._insert_log, msg)
+            
+            def _insert_log(self, msg):
+                """在主线程中插入日志并滚动"""
+                self.text_widget.insert(tk.END, msg)
+                self.text_widget.yview_moveto(1.0)  # 确保滚动到底部
         
-        # 创建日志区域
-        self.log_frame = ttk.LabelFrame(self.root, text="日志输出", padding="5")
-        self.log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # 创建日志区域（放在右侧面板）
+        self.log_frame = ttk.LabelFrame(self.right_panel, text="日志输出")
+        self.log_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         
-        self.log_text = tk.Text(self.log_frame, height=10, wrap=tk.WORD)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+        # 配置日志框架的grid权重
+        self.log_frame.grid_rowconfigure(0, weight=1)
+        self.log_frame.grid_columnconfigure(0, weight=1)
+        
+        # 创建文本框和滚动条
+        self.log_text = tk.Text(self.log_frame, wrap=tk.WORD)
+        self.log_scrollbar = ttk.Scrollbar(self.log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=self.log_scrollbar.set)
+        
+        # 放置文本框和滚动条
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        self.log_scrollbar.grid(row=0, column=1, sticky="ns")
         
         # 配置日志处理
         handler = TextHandler(self.log_text, self)
-        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
         logging.getLogger().addHandler(handler)
         logging.getLogger().setLevel(logging.INFO)
     
     def _create_widgets(self):
         """创建GUI组件"""
+        # 所有组件都放在左侧面板中
         # 驱动控制区域
-        driver_frame = ttk.LabelFrame(self.root, text="驱动控制", padding="5")
+        driver_frame = ttk.LabelFrame(self.left_panel, text="驱动控制", padding="5")
         driver_frame.pack(fill=tk.X, padx=5, pady=5)
         
         self.load_btn = ttk.Button(driver_frame, text="安装驱动", command=self._load_driver)
@@ -110,7 +143,7 @@ class LYKeysGUI:
         self.unload_btn.pack(side=tk.LEFT, padx=5)
         
         # 状态检查区域
-        status_frame = ttk.LabelFrame(self.root, text="驱动状态", padding="5")
+        status_frame = ttk.LabelFrame(self.left_panel, text="驱动状态", padding="5")
         status_frame.pack(fill=tk.X, padx=5, pady=5)
         
         # 状态显示标签
@@ -126,7 +159,7 @@ class LYKeysGUI:
         self.check_status_btn.pack(side=tk.RIGHT, padx=5)
         
         # 输入/输出区域
-        io_frame = ttk.LabelFrame(self.root, text="输入/输出", padding="5")
+        io_frame = ttk.LabelFrame(self.left_panel, text="输入/输出", padding="5")
         io_frame.pack(fill=tk.X, padx=5, pady=5)
         
         # 左侧输入区域
@@ -157,7 +190,7 @@ class LYKeysGUI:
         self.clear_btn.pack(side=tk.TOP, pady=2)
         
         # 测试功能区域
-        test_frame = ttk.LabelFrame(self.root, text="测试功能", padding="5")
+        test_frame = ttk.LabelFrame(self.left_panel, text="测试功能", padding="5")
         test_frame.pack(fill=tk.X, padx=5, pady=5)
         
         self.test_key_btn = ttk.Button(test_frame, text="按键测试", command=self._test_keyboard, state=tk.DISABLED)
@@ -170,7 +203,7 @@ class LYKeysGUI:
         self.test_mouse_btn.pack(side=tk.LEFT, padx=5)
         
         # 高频按键测试区域
-        rapid_test_frame = ttk.LabelFrame(self.root, text="高频按键测试", padding="5")
+        rapid_test_frame = ttk.LabelFrame(self.left_panel, text="高频按键测试", padding="5")
         rapid_test_frame.pack(fill=tk.X, padx=5, pady=5)
         
         # 第一行：按键和时间设置
@@ -223,6 +256,30 @@ class LYKeysGUI:
         # 点击频率
         self.click_rate_label = ttk.Label(status_frame, text="平均频率: 0次/秒")
         self.click_rate_label.pack(side=tk.LEFT, padx=20)
+        
+        # 鼠标按键测试区域
+        mouse_buttons_frame = ttk.LabelFrame(self.left_panel, text="鼠标按键测试")
+        mouse_buttons_frame.pack(padx=5, pady=5, fill="x")
+
+        # 鼠标按键测试按钮
+        ttk.Button(mouse_buttons_frame, text="左键点击", command=lambda: self._test_mouse_click("left")).pack(side="left", padx=5, pady=5)
+        ttk.Button(mouse_buttons_frame, text="右键点击", command=lambda: self._test_mouse_click("right")).pack(side="left", padx=5, pady=5)
+        ttk.Button(mouse_buttons_frame, text="中键点击", command=lambda: self._test_mouse_click("middle")).pack(side="left", padx=5, pady=5)
+        ttk.Button(mouse_buttons_frame, text="X1键点击", command=lambda: self._test_mouse_click("x1")).pack(side="left", padx=5, pady=5)
+        ttk.Button(mouse_buttons_frame, text="X2键点击", command=lambda: self._test_mouse_click("x2")).pack(side="left", padx=5, pady=5)
+
+        # 鼠标滚轮测试区域
+        mouse_wheel_frame = ttk.LabelFrame(self.left_panel, text="鼠标滚轮测试")
+        mouse_wheel_frame.pack(padx=5, pady=5, fill="x")
+
+        # 滚轮测试按钮
+        ttk.Button(mouse_wheel_frame, text="向上滚动", command=lambda: self._test_mouse_wheel("up")).pack(side="left", padx=5, pady=5)
+        ttk.Button(mouse_wheel_frame, text="向下滚动", command=lambda: self._test_mouse_wheel("down")).pack(side="left", padx=5, pady=5)
+
+        # 滚动量输入框
+        self.wheel_delta_var = tk.StringVar(value="120")
+        ttk.Label(mouse_wheel_frame, text="滚动量:").pack(side="left", padx=5, pady=5)
+        ttk.Entry(mouse_wheel_frame, textvariable=self.wheel_delta_var, width=5).pack(side="left", padx=5, pady=5)
     
     def _update_button_states(self, driver_loaded):
         """更新按钮状态"""
@@ -328,24 +385,137 @@ class LYKeysGUI:
         """测试鼠标移动"""
         def run_test():
             try:
-                # 移动测试
+                logging.info("开始鼠标测试...")
+                time.sleep(1)  # 给用户准备时间
+                
+                # 1. 相对移动测试
+                logging.info("=== 开始相对移动测试 ===")
+                
+                # 基本方向测试
                 moves = [
-                    (100, 0),   # 右
-                    (0, 100),   # 下
-                    (-100, 0),  # 左
-                    (0, -100)   # 上
+                    (100, 0, "右"),
+                    (0, 100, "下"),
+                    (-100, 0, "左"),
+                    (0, -100, "上")
                 ]
                 
-                for dx, dy in moves:
-                    logging.info(f"鼠标移动: ({dx}, {dy})")
+                for dx, dy, direction in moves:
+                    logging.info(f"测试{direction}移动: ({dx}, {dy})")
                     self.input_tester.mouse_move_rel(dx, dy)
                     time.sleep(0.5)
                 
-                # 点击测试
-                logging.info("测试鼠标点击")
+                # 对角线移动测试
+                diag_moves = [
+                    (50, 50, "右下"),
+                    (-50, 50, "左下"),
+                    (-50, -50, "左上"),
+                    (50, -50, "右上")
+                ]
+                
+                for dx, dy, direction in diag_moves:
+                    logging.info(f"测试{direction}对角移动: ({dx}, {dy})")
+                    self.input_tester.mouse_move_rel(dx, dy)
+                    time.sleep(0.5)
+                
+                # 小距离精确移动测试
+                small_moves = [(5, 0), (0, 5), (-5, 0), (0, -5)]
+                logging.info("测试小距离精确移动")
+                for dx, dy in small_moves:
+                    self.input_tester.mouse_move_rel(dx, dy)
+                    time.sleep(0.3)
+                
+                # 2. 绝对移动测试
+                logging.info("\n=== 开始绝对移动测试 ===")
+                
+                # 获取虚拟屏幕信息
+                virtual_width = ctypes.windll.user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+                virtual_height = ctypes.windll.user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+                virtual_x = ctypes.windll.user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+                virtual_y = ctypes.windll.user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+                
+                # 屏幕边界点测试
+                border_points = [
+                    (virtual_x, virtual_y, "左上角"),
+                    (virtual_x + virtual_width - 1, virtual_y, "右上角"),
+                    (virtual_x, virtual_y + virtual_height - 1, "左下角"),
+                    (virtual_x + virtual_width - 1, virtual_y + virtual_height - 1, "右下角")
+                ]
+                
+                for x, y, position in border_points:
+                    logging.info(f"测试移动到屏幕{position}: ({x}, {y})")
+                    self.input_tester.mouse_move_abs(x, y)
+                    time.sleep(0.8)
+                
+                # 屏幕中心点测试
+                center_x = virtual_x + virtual_width // 2
+                center_y = virtual_y + virtual_height // 2
+                logging.info(f"测试移动到屏幕中心: ({center_x}, {center_y})")
+                self.input_tester.mouse_move_abs(center_x, center_y)
+                time.sleep(0.8)
+                
+                # 多显示器测试（如果有）
+                monitor_count = ctypes.windll.user32.GetSystemMetrics(80)  # SM_CMONITORS
+                if monitor_count > 1:
+                    logging.info(f"\n检测到{monitor_count}个显示器，开始多显示器测试")
+                    
+                    # 在每个显示器上进行测试
+                    def enum_monitor_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
+                        monitor_info = ctypes.wintypes.MONITORINFO()
+                        monitor_info.cbSize = ctypes.sizeof(monitor_info)
+                        ctypes.windll.user32.GetMonitorInfoW(hMonitor, ctypes.byref(monitor_info))
+                        
+                        # 获取显示器工作区
+                        work_area = monitor_info.rcWork
+                        center_x = (work_area.left + work_area.right) // 2
+                        center_y = (work_area.top + work_area.bottom) // 2
+                        
+                        logging.info(f"测试显示器 工作区域: ({work_area.left}, {work_area.top}, {work_area.right}, {work_area.bottom})")
+                        logging.info(f"移动到显示器中心点: ({center_x}, {center_y})")
+                        self.input_tester.mouse_move_abs(center_x, center_y)
+                        time.sleep(0.8)
+                        
+                        return True
+                    
+                    EnumMonitorProc = ctypes.WINFUNCTYPE(
+                        ctypes.c_bool,
+                        ctypes.c_ulong,
+                        ctypes.c_ulong,
+                        ctypes.POINTER(ctypes.wintypes.RECT),
+                        ctypes.c_ulong
+                    )
+                    
+                    callback = EnumMonitorProc(enum_monitor_proc)
+                    ctypes.windll.user32.EnumDisplayMonitors(None, None, callback, 0)
+                
+                # 3. 鼠标按键测试
+                logging.info("\n=== 开始鼠标按键测试 ===")
+                
+                # 左键测试
+                logging.info("测试左键点击")
                 self.input_tester.mouse_click()
+                time.sleep(0.5)
+                
+                # 右键测试
+                logging.info("测试右键点击")
+                self.input_tester.mouse_right_click()
+                time.sleep(0.5)
+                
+                # 中键测试
+                logging.info("测试中键点击")
+                self.input_tester.mouse_middle_click()
+                time.sleep(0.5)
+                
+                # 额外按键测试
+                logging.info("测试X1按键点击")
+                self.input_tester.mouse_x1_click()
+                time.sleep(0.5)
+                
+                logging.info("测试X2按键点击")
+                self.input_tester.mouse_x2_click()
+                time.sleep(0.5)
                 
                 logging.info("鼠标测试完成")
+                
             except Exception as e:
                 logging.error(f"鼠标测试出错: {str(e)}")
         
@@ -449,7 +619,7 @@ class LYKeysGUI:
     
     def create_path_frame(self):
         """创建路径配置区域"""
-        path_frame = ttk.LabelFrame(self.root, text="驱动路径配置", padding="5")
+        path_frame = ttk.LabelFrame(self.left_panel, text="驱动路径配置", padding="5")
         path_frame.pack(fill="x", padx=5, pady=5)
         
         # DLL路径配置
@@ -640,15 +810,17 @@ class LYKeysGUI:
                 duration = 0  # 默认无限运行
             
             # 初始化计时和计数
-            start_time = time.time()
+            start_time = time.perf_counter()  # 使用高精度计时器
             last_update_time = start_time
             
             while self.rapid_test_running and self.is_driver_loaded:
-                current_time = time.time()
+                current_time = time.perf_counter()
                 elapsed_time = current_time - start_time
                 
                 # 检查是否达到运行时长
                 if duration > 0 and elapsed_time >= duration:
+                    # 确保最后一次更新显示准确的运行时间
+                    self.root.after(0, self._update_status, duration, self.press_count / duration if duration > 0 else 0)
                     self.root.after(0, self._stop_test)
                     break
                 
@@ -696,7 +868,7 @@ class LYKeysGUI:
             elapsed_time (float): 运行时间（秒）
             rate (float): 点击频率（次/秒）
         """
-        self.run_time_label.config(text=f"运行时间: {int(elapsed_time)}秒")
+        self.run_time_label.config(text=f"运行时间: {round(elapsed_time, 1)}秒")
         self.click_rate_label.config(text=f"平均频率: {rate:.1f}次/秒")
     
     def _stop_test(self):
@@ -774,6 +946,134 @@ class LYKeysGUI:
         except Exception as e:
             messagebox.showerror("错误", f"权限检查失败: {str(e)}")
             return True  # 出错时也继续运行
+
+    def _test_mouse_click(self, button: str) -> None:
+        """测试鼠标点击
+        
+        Args:
+            button: 鼠标按钮，"left", "right", "middle", "x1", "x2"
+        """
+        def run_test():
+            try:
+                # 检查驱动状态
+                if not self.is_driver_loaded or not self.input_tester:
+                    logging.error("驱动未加载或测试器未初始化")
+                    messagebox.showerror("错误", "请先加载驱动")
+                    return
+
+                # 获取屏幕信息
+                screen_width = ctypes.windll.user32.GetSystemMetrics(0)  # SM_CXSCREEN
+                screen_height = ctypes.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN
+                
+                # 计算测试位置（屏幕中心偏右）
+                test_x = screen_width * 3 // 4
+                test_y = screen_height // 2
+
+                # 移动到测试位置
+                logging.info(f"移动鼠标到测试位置: ({test_x}, {test_y})")
+                if not self.input_tester.mouse_move_abs(test_x, test_y):
+                    raise Exception("鼠标移动失败")
+                time.sleep(1)  # 等待移动完成
+
+                # 根据按钮类型执行不同的测试
+                if button == "left":
+                    logging.info("测试左键点击 - 请观察鼠标位置的选择效果")
+                    # 双击测试
+                    self.input_tester.mouse_click(duration=0.1)
+                    time.sleep(0.1)
+                    self.input_tester.mouse_click(duration=0.1)
+                    
+                elif button == "right":
+                    logging.info("测试右键点击 - 请观察是否出现右键菜单")
+                    self.input_tester.mouse_right_click()
+                    
+                elif button == "middle":
+                    # 先移动到浏览器标签区域位置
+                    test_y = screen_height // 8
+                    logging.info(f"移动鼠标到标签栏位置: ({test_x}, {test_y})")
+                    self.input_tester.mouse_move_abs(test_x, test_y)
+                    time.sleep(1)
+                    
+                    logging.info("测试中键点击 - 如果在浏览器中，应该会打开新标签页")
+                    self.input_tester.mouse_middle_click()
+                    
+                elif button == "x1":
+                    logging.info("测试X1键点击 - 如果在浏览器中，应该会后退")
+                    self.input_tester.mouse_x1_click()
+                    
+                elif button == "x2":
+                    logging.info("测试X2键点击 - 如果在浏览器中，应该会前进")
+                    self.input_tester.mouse_x2_click()
+
+                logging.info(f"{button}键测试完成")
+                    
+            except Exception as e:
+                logging.error(f"鼠标点击测试出错: {str(e)}")
+                messagebox.showerror("错误", f"鼠标点击测试出错: {str(e)}")
+
+        # 在新线程中运行测试
+        threading.Thread(target=run_test, daemon=True).start()
+
+    def _test_mouse_wheel(self, direction: str) -> None:
+        """测试鼠标滚轮
+        
+        Args:
+            direction: 滚动方向，"up" 或 "down"
+        """
+        def run_test():
+            try:
+                # 检查驱动状态
+                if not self.is_driver_loaded or not self.input_tester:
+                    logging.error("驱动未加载或测试器未初始化")
+                    messagebox.showerror("错误", "请先加载驱动")
+                    return
+
+                # 获取滚动量
+                wheel_delta = int(self.wheel_delta_var.get())
+                logging.info(f"滚轮测试 - 方向: {direction}, 滚动量: {wheel_delta}")
+                
+                if wheel_delta <= 0:
+                    logging.error(f"无效的滚动量: {wheel_delta}")
+                    messagebox.showerror("错误", "滚动量必须大于0")
+                    return
+                    
+                # 检查驱动状态
+                self.input_tester.check_device_status()
+                driver_status = self.input_tester.get_driver_status()
+                if driver_status != 1:  # DEVICE_STATUS_READY
+                    logging.error(f"驱动状态异常: {driver_status}")
+                    messagebox.showerror("错误", "驱动状态异常")
+                    return
+
+                # 添加3秒延时
+                logging.info("滚轮测试将在3秒后开始...")
+                time.sleep(3)
+                    
+                # 根据方向调用相应函数
+                if direction == "up":
+                    logging.info("执行向上滚动")
+                    if not self.input_tester.mouse_wheel_up(wheel_delta):
+                        logging.error("鼠标滚轮向上滚动失败")
+                        messagebox.showerror("错误", "鼠标滚轮向上滚动失败")
+                    else:
+                        logging.info("向上滚动成功")
+                else:
+                    logging.info("执行向下滚动")
+                    if not self.input_tester.mouse_wheel_down(wheel_delta):
+                        logging.error("鼠标滚轮向下滚动失败")
+                        messagebox.showerror("错误", "鼠标滚轮向下滚动失败")
+                    else:
+                        logging.info("向下滚动成功")
+                        
+            except ValueError as ve:
+                logging.error(f"数值转换错误: {str(ve)}")
+                messagebox.showerror("错误", "请输入有效的滚动量数值")
+            except Exception as e:
+                logging.error(f"鼠标滚轮测试出错: {str(e)}")
+                messagebox.showerror("错误", f"鼠标滚轮测试出错: {str(e)}")
+
+        # 使用新线程运行滚轮测试，避免阻塞GUI
+        threading.Thread(target=run_test, daemon=True).start()
 
 if __name__ == '__main__':
     try:
