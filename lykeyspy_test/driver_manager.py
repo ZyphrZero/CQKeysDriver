@@ -4,13 +4,20 @@ import os
 import logging
 from ctypes import CDLL, c_int, c_ulonglong
 import json
+import sys
+import ctypes
 
 
 class DriverManager:
     def __init__(self):
         self.driver = None
-        self._setup_paths()
         self._setup_logging()
+        
+        # 在初始化时就检查权限
+        if not self.check_and_elevate_privileges():
+            raise PermissionError("需要管理员权限")
+            
+        self._setup_paths()
     
     def _setup_paths(self, dll_path=None, sys_path=None):
         """设置驱动路径
@@ -60,9 +67,63 @@ class DriverManager:
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
     
+    def check_and_elevate_privileges(self):
+        """检查并提升权限
+        
+        Returns:
+            bool: 如果已经有管理员权限返回True，需要提权返回False
+        """
+        try:
+            if not self.is_admin():
+                logging.warning("需要管理员权限才能加载驱动")
+                return False
+            return True
+        except Exception as e:
+            logging.error(f"权限检查失败: {str(e)}")
+            return False
+    
+    def is_admin(self):
+        """检查是否具有管理员权限"""
+        try:
+            return ctypes.windll.shell32.IsUserAnAdmin()
+        except:
+            return False
+            
+    def run_as_admin(self):
+        """请求管理员权限"""
+        if not self.is_admin():
+            logging.info("正在请求管理员权限...")
+            script = os.path.abspath(sys.argv[0])
+            params = ' '.join(sys.argv[1:])
+            try:
+                ret = ctypes.windll.shell32.ShellExecuteW(
+                    None, 
+                    "runas",
+                    sys.executable,
+                    f'"{script}" {params}',
+                    None,
+                    1
+                )
+                if ret > 32:
+                    return True
+                else:
+                    logging.error(f"权限提升失败,错误码: {ret}")
+                    return False
+            except Exception as e:
+                logging.error(f"权限提升异常: {str(e)}")
+                return False
+        return True
+
     def initialize(self):
         """初始化驱动"""
         try:
+            # 1. 检查并请求管理员权限
+            if not self.is_admin():
+                logging.warning("需要管理员权限才能加载驱动")
+                if not self.run_as_admin():
+                    raise PermissionError("无法获取管理员权限,请以管理员身份运行程序")
+                return False  # 程序将重启
+                
             logging.info("开始加载驱动...")
             self.driver = CDLL(self.dll_path)
             
@@ -85,7 +146,13 @@ class DriverManager:
             return True
             
         except Exception as e:
-            logging.error(f"初始化失败: {str(e)}")
+            if isinstance(e, WindowsError) and e.winerror == 5:  # ERROR_ACCESS_DENIED
+                logging.error("访问被拒绝,请确保以管理员身份运行")
+                if not self.is_admin():
+                    logging.info("尝试重新以管理员身份启动...")
+                    self.run_as_admin()
+            else:
+                logging.error(f"初始化失败: {str(e)}")
             self.cleanup()
             return False
     

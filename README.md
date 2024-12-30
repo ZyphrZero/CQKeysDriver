@@ -5,6 +5,11 @@ _本项目遵循 AGPLv3 开源协议基于以下原始项目修改:_
 - kmclass: `https://github.com/BestBurning/kmclass`
 - kmclassdll: `https://github.com/BestBurning/kmclassdll`
 
+## Demo运行
+1. 运行
+  - debug模式：`python gui.py --debug`
+  - 正常模式：`python gui.py`
+
 ## kmclass驱动程序
 
 ### 编译

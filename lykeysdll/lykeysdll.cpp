@@ -409,20 +409,50 @@ BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 	SC_HANDLE hServiceDDK = NULL;
 	const DWORD START_TIMEOUT = 3000; // 启动超时时间(毫秒)
 	
-	// 1. 快速检查系统兼容性
+	// 1. 添加权限检查
+	HANDLE hToken;
+	BOOL isElevated = FALSE;
+	if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+		TOKEN_ELEVATION elevation;
+		DWORD dwSize;
+		if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &dwSize)) {
+			isElevated = elevation.TokenIsElevated;
+		}
+		CloseHandle(hToken);
+	}
+	
+	if (!isElevated) {
+		SetLastError(ERROR_ACCESS_DENIED);
+		printf("Elevated privileges required. Please run as administrator.\n");
+		return FALSE;
+	}
+	
+	// 2. 增强错误处理的OpenSCManager调用
+	hServiceMgr = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+	if (!hServiceMgr) {
+		DWORD error = GetLastError();
+		char* errorMessage = NULL;
+		FormatMessageA(
+			FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+			NULL,
+			error,
+			0,
+			(LPSTR)&errorMessage,
+			0,
+			NULL
+		);
+		printf("OpenSCManager failed with detailed error: %d - %s\n", error, errorMessage);
+		LocalFree(errorMessage);
+		return FALSE;
+	}
+	
+	// 3. 快速检查系统兼容性
 	if (!CheckSystemCompatibility()) {
 		printf("System compatibility check failed\n");
 		return FALSE;
 	}
 	
-	// 2. 打开服务管理器
-	hServiceMgr = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-	if (!hServiceMgr) {
-		printf("OpenSCManager() Failed: %d\n", GetLastError());
-		return FALSE;
-	}
-	
-	// 3. 尝试打开已存在的服务
+	// 4. 尝试打开已存在的服务
 	hServiceDDK = OpenServiceA(hServiceMgr, lpszDriverName, SERVICE_ALL_ACCESS);
 	if (hServiceDDK) {
 		// 服务已存在，尝试直接启动
@@ -445,7 +475,7 @@ BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 		hServiceDDK = NULL;
 	}
 	
-	// 4. 创建新服务
+	// 5. 创建新服务
 	hServiceDDK = CreateServiceA(
 		hServiceMgr,
 		lpszDriverName,        // 驱动程序的在注册表中的名字  
@@ -467,7 +497,7 @@ BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 		goto cleanup;
 	}
 	
-	// 5. 启动服务
+	// 6. 启动服务
 	if (!StartService(hServiceDDK, 0, NULL)) {
 		DWORD error = GetLastError();
 		if (error == ERROR_SERVICE_ALREADY_RUNNING) {
@@ -479,7 +509,7 @@ BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 		goto cleanup;
 	}
 	
-	// 6. 等待服务启动完成
+	// 7. 等待服务启动完成
 	SERVICE_STATUS status;
 	DWORD startTime = GetTickCount();
 	while (TRUE) {
@@ -570,6 +600,8 @@ BOOL __cdecl UnloadNTDriver(char* szSvrName)
 		while (status.dwCurrentState != SERVICE_STOPPED) {
 			Sleep(50); // 短暂等待
 			
+			Sleep(50); // 短暂等待
+			
 			if (!QueryServiceStatus(hServiceDDK, &status)) {
 				break;
 			}
@@ -628,4 +660,3 @@ else if (ul_reason_for_call==DLL_PROCESS_DETACH)
 #ifdef _MANAGED
 #pragma managed(pop)
 #endif
-

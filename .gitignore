@@ -5,6 +5,8 @@ x64/
 *.vcxproj.user
 .vscode/
 dll/
+*.log
+__pycache__/
 
 # Compiled Object files
 *.slo

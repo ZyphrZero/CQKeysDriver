@@ -10,10 +10,31 @@ from virtuakeys_mapping import VirtualKeys
 import logging
 import os
 import json
+import sys
+import ctypes
+import argparse
 
+# 添加命令行参数解析
+# python gui.py --debug
+parser = argparse.ArgumentParser()
+parser.add_argument('--debug', action='store_true', help='启用调试模式')
+args = parser.parse_args()
+
+# 使用命令行参数设置调试模式
+DEBUG_MODE = args.debug
+
+# 在类外部或文件开头定义常量
+SW_HIDE = 0
+SW_SHOWNORMAL = 1
+SW_MINIMIZE = 6
+SW_MAXIMIZE = 3
 
 class LYKeysGUI:
     def __init__(self):
+        # 在创建窗口前检查权限
+        if not self.check_privileges():
+            sys.exit(0)  # 干净地退出程序
+            
         self.root = tk.Tk()
         self.root.title("键鼠驱动测试工具")
         self.root.geometry("570x750")
@@ -687,7 +708,80 @@ class LYKeysGUI:
     def _update_press_count(self):
         """更新按键计数显示"""
         self.press_count_label.config(text=f"按键次数: {self.press_count}")
+    
+    def check_privileges(self):
+        """检查权限并在需要时请求提升
+        
+        Returns:
+            bool: 如果已经有管理员权限返回True，否则返回False
+        """
+        try:
+            if ctypes.windll.shell32.IsUserAnAdmin():
+                return True
+                
+            # 需要提权
+            response = messagebox.askyesno(
+                "权限提示",
+                "此程序需要管理员权限才能正常使用驱动功能。\n是否以管理员身份重新启动？\n\n" +
+                "点击'否'将以普通权限运行，但驱动相关功能可能无法使用。"
+            )
+            
+            if response:
+                # 准备以管理员身份重启
+                script = os.path.abspath(sys.argv[0])
+                
+                # 根据调试模式选择python解释器
+                if DEBUG_MODE:
+                    python_exe = sys.executable  # 使用python.exe
+                    window_mode = SW_SHOWNORMAL  # 显示窗口
+                else:
+                    # 使用pythonw.exe
+                    pythonw_path = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+                    python_exe = pythonw_path if os.path.exists(pythonw_path) else sys.executable
+                    window_mode = SW_HIDE  # 隐藏窗口
+                    
+                # 构建参数字符串
+                params = ' '.join([f'"{arg}"' for arg in sys.argv[1:]])
+                
+                ret = ctypes.windll.shell32.ShellExecuteW(
+                    None, 
+                    "runas",
+                    python_exe,
+                    f'"{script}" {params}',
+                    None,
+                    window_mode
+                )
+                
+                # 返回值大于32表示成功
+                if ret > 32:
+                    return False  # 返回False以关闭当前实例
+                else:
+                    messagebox.showerror(
+                        "错误",
+                        f"无法获取管理员权限 (错误码: {ret})"
+                    )
+                    return True  # 继续以普通权限运行
+            else:
+                # 用户选择不提升权限
+                messagebox.showwarning(
+                    "权限提示",
+                    "您选择了以普通权限运行程序。\n" +
+                    "请注意：驱动相关功能将无法使用，但其他功能不受影响。\n" +
+                    "如需使用完整功能，请重新启动程序并选择以管理员身份运行。"
+                )
+                return True  # 继续以普通权限运行
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"权限检查失败: {str(e)}")
+            return True  # 出错时也继续运行
 
 if __name__ == '__main__':
-    app = LYKeysGUI()
-    app.run() 
+    try:
+        app = LYKeysGUI()
+        app.run()
+    except PermissionError:
+        # 权限相关的错误已经在check_privileges中处理
+        pass
+    except Exception as e:
+        # 其他未预期的错误
+        messagebox.showerror("错误", f"程序运行出错: {str(e)}") 
