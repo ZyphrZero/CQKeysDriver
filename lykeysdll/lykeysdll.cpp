@@ -9,6 +9,138 @@
 #include <algorithm>
 #include <sysinfoapi.h>
 #include <time.h>
+#include <TlHelp32.h>
+
+// 使用std命名空间中的min和max
+using std::min;
+using std::max;
+
+// 字符串加密宏和常量
+#define XSTR_SEED (0x11223344 ^ 0xABCDEF12)  // 更复杂的种子
+#define ENCRYPT_CHAR(ch, seed) ((ch) ^ ((seed) >> 8) ^ ((seed) & 0xFF))  // 增强的加密算法
+#define DECRYPT_CHAR(ch, seed) ENCRYPT_CHAR(ch, seed)
+
+// 字符串加密类
+class XorString {
+private:
+	unsigned char* m_encryptedData;
+	size_t m_length;
+	DWORD m_seed;
+	bool m_isDecrypted;
+
+	void Encrypt() {
+		DWORD rolling_seed = m_seed;
+		for (size_t i = 0; i < m_length; i++) {
+			m_encryptedData[i] = ENCRYPT_CHAR(m_encryptedData[i], rolling_seed);
+			rolling_seed = _rotl(rolling_seed, 3) + m_encryptedData[i] + 0x37;
+		}
+		m_isDecrypted = false;
+	}
+
+public:
+	XorString(const char* data, DWORD seed = XSTR_SEED) : m_seed(seed), m_isDecrypted(false) {
+		m_length = strlen(data);
+		m_encryptedData = new unsigned char[m_length + 1];
+		memcpy(m_encryptedData, data, m_length);
+		m_encryptedData[m_length] = '\0';
+		Encrypt();
+	}
+
+	~XorString() {
+		if (m_encryptedData) {
+			if (m_isDecrypted) {
+				SecureZeroMemory(m_encryptedData, m_length);
+			}
+			delete[] m_encryptedData;
+		}
+	}
+
+	const char* Decrypt() {
+		if (!m_isDecrypted) {
+			DWORD rolling_seed = m_seed;
+			for (size_t i = 0; i < m_length; i++) {
+				unsigned char decrypted = DECRYPT_CHAR(m_encryptedData[i], rolling_seed);
+				rolling_seed = _rotl(rolling_seed, 3) + m_encryptedData[i] + 0x37;
+				m_encryptedData[i] = decrypted;
+			}
+			m_isDecrypted = true;
+		}
+		return (const char*)m_encryptedData;
+	}
+
+	void ReEncrypt() {
+		if (m_isDecrypted) {
+			Encrypt();
+		}
+	}
+};
+
+// 加密的关键字符串
+namespace EncryptedStrings {
+	static XorString g_DevicePath("\\\\.\\lykeys", XSTR_SEED ^ 0x12345678);
+	static XorString g_DriverName("lykeys", XSTR_SEED ^ 0x87654321);
+	static XorString g_NtdllName("ntdll.dll", XSTR_SEED ^ 0xABCDEF00);
+	static XorString g_Kernel32Name("kernel32.dll", XSTR_SEED ^ 0x55AA55AA);
+	static XorString g_NtQueryInfoProcess("NtQueryInformationProcess", XSTR_SEED ^ 0x11111111);
+}
+
+// 反调试检测函数
+bool IsDebuggerPresentEx() {
+	typedef NTSTATUS(NTAPI* pNtQueryInformationProcess)(
+		IN HANDLE ProcessHandle,
+		IN PROCESSINFOCLASS ProcessInformationClass,
+		OUT PVOID ProcessInformation,
+		IN ULONG ProcessInformationLength,
+		OUT PULONG ReturnLength OPTIONAL
+	);
+
+	HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+	if (!hNtdll) return false;
+
+	pNtQueryInformationProcess NtQueryInformationProcess = (pNtQueryInformationProcess)
+		GetProcAddress(hNtdll, "NtQueryInformationProcess");
+	if (!NtQueryInformationProcess) return false;
+
+	DWORD_PTR debugPort = 0;
+	NTSTATUS status = NtQueryInformationProcess(
+		GetCurrentProcess(),
+		ProcessDebugPort,
+		&debugPort,
+		sizeof(debugPort),
+		NULL
+	);
+
+	// 检查调试标志
+	BOOL isDebuggerPresent = FALSE;
+	CheckRemoteDebuggerPresent(GetCurrentProcess(), &isDebuggerPresent);
+	
+	// 检查进程名称
+	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (hSnapshot != INVALID_HANDLE_VALUE) {
+		PROCESSENTRY32W pe32;
+		pe32.dwSize = sizeof(pe32);
+		if (Process32FirstW(hSnapshot, &pe32)) {
+			do {
+				if (wcsstr(pe32.szExeFile, L"ollydbg.exe") ||
+					wcsstr(pe32.szExeFile, L"x64dbg.exe") ||
+					wcsstr(pe32.szExeFile, L"windbg.exe")) {
+					CloseHandle(hSnapshot);
+					return true;
+				}
+			} while (Process32NextW(hSnapshot, &pe32));
+		}
+		CloseHandle(hSnapshot);
+	}
+
+	return (NT_SUCCESS(status) && debugPort) || isDebuggerPresent;
+}
+
+// 反调试保护宏
+#define ANTI_DEBUG_CHECK() \
+	if (IsDebuggerPresentEx()) { \
+		SetLastError(ERROR_ACCESS_DENIED); \
+		return FALSE; \
+	}
 
 typedef LONG NTSTATUS;
 typedef NTSTATUS (WINAPI *pfnRtlGetVersion)(PRTL_OSVERSIONINFOW);
@@ -151,7 +283,7 @@ BOOL CheckSystemCompatibility()
 
 // 装载NT驱动程序
 HANDLE drvhandle;
-extern "C" __declspec(dllexport) void __cdecl SetHandle();
+extern "C" __declspec(dllexport) BOOL __cdecl SetHandle();
 // extern "C" __declspec(dllexport) void __cdecl SetHandle(HANDLE handle);
 extern "C" __declspec(dllexport) void __cdecl KeyDown(USHORT VirtualKey);
 extern "C" __declspec(dllexport) void __cdecl KeyUp(USHORT VirtualKey);
@@ -176,11 +308,14 @@ extern "C" __declspec(dllexport) void __cdecl MouseWheelDown(USHORT wheelDelta);
 DEVICE_STATUS CheckDriverStatus(HANDLE deviceHandle) 
 {
 	if (deviceHandle == INVALID_HANDLE_VALUE || deviceHandle == NULL) {
+		printf("Error: Invalid device handle\n");
 		return DEVICE_STATUS_ERROR;
 	}
 
 	// 尝试与驱动通信
 	DWORD bytesReturned = 0;
+	DWORD lastError = 0;
+	
 	if (!DeviceIoControl(deviceHandle, 
 		IOCTL_KEYBOARD,  // 任意一个IOCTL都可以用来测试驱动状态
 		NULL, 0,
@@ -188,6 +323,8 @@ DEVICE_STATUS CheckDriverStatus(HANDLE deviceHandle)
 		&bytesReturned,
 		NULL)) 
 	{
+		lastError = GetLastError();
+		printf("Error: DeviceIoControl failed, error code: %d\n", lastError);
 		return DEVICE_STATUS_ERROR;
 	}
 
@@ -217,22 +354,43 @@ extern "C" __declspec(dllexport) ULONGLONG __cdecl GetLastCheckTime()
 }
 
 // SetHandle函数
-void SetHandle()
+BOOL SetHandle()
 {
+	ANTI_DEBUG_CHECK();
+
+	// 检查是否已经有有效句柄
+	if (drvhandle != NULL && drvhandle != INVALID_HANDLE_VALUE) {
+		CloseHandle(drvhandle);
+		drvhandle = NULL;
+	}
+
+	const char* devicePath = EncryptedStrings::g_DevicePath.Decrypt();
 	drvhandle = CreateFileA(
-		"\\\\.\\lykeys",
+		devicePath,
 		GENERIC_WRITE | GENERIC_READ,
 		0,
 		NULL,
 		OPEN_EXISTING,
 		0,
 		0);
+	EncryptedStrings::g_DevicePath.ReEncrypt();
+
+	if (drvhandle == INVALID_HANDLE_VALUE || drvhandle == NULL) {
+		DWORD error = GetLastError();
+		printf("Error: Cannot open device, error code: %d\n", error);
+		return FALSE;
+	}
 
 	// 初始化驱动状态
 	CheckDeviceStatus();
 	
 	// 打印初始状态
-	printf("Driver Status: %d\n", (int)g_DriverState.status.load());
+	DEVICE_STATUS status = g_DriverState.status.load();
+	printf("Driver Status: %s\n", 
+		status == DEVICE_STATUS_READY ? "Ready" :
+		status == DEVICE_STATUS_ERROR ? "Error" : "Unknown");
+	
+	return status == DEVICE_STATUS_READY;
 }
 
 // 内联辅助函数
@@ -370,8 +528,8 @@ void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy)
 	LONG adjustedY = dy - virtualScreenY;
 
 	// 确保坐标在有效范围内
-	adjustedX = max(0, min(adjustedX, virtualScreenWidth));
-	adjustedY = max(0, min(adjustedY, virtualScreenHeight));
+	adjustedX = (adjustedX < 0) ? 0 : ((adjustedX > virtualScreenWidth) ? virtualScreenWidth : adjustedX);
+	adjustedY = (adjustedY < 0) ? 0 : ((adjustedY > virtualScreenHeight) ? virtualScreenHeight : adjustedY);
 
 	// 将坐标映射到0xFFFF范围
 	mid.LastX = (LONG)((float)adjustedX * 65535.0f / (float)virtualScreenWidth);
@@ -445,10 +603,23 @@ void __cdecl MouseWheelDown(USHORT wheelDelta)
 // 装载驱动程序
 BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 {
+	ANTI_DEBUG_CHECK();
+
+	// 先检查驱动是否已经加载
+	if (drvhandle != NULL && drvhandle != INVALID_HANDLE_VALUE) {
+		printf("Driver already loaded!\n");
+		return TRUE;
+	}
+
 	BOOL bRet = FALSE;
 	SC_HANDLE hServiceMgr = NULL;
 	SC_HANDLE hServiceDDK = NULL;
 	const DWORD START_TIMEOUT = 3000; // 启动超时时间(毫秒)
+	
+	// 使用加密的DLL名称
+	const char* ntdllName = EncryptedStrings::g_NtdllName.Decrypt();
+	HMODULE hNtdll = GetModuleHandleA(ntdllName);
+	EncryptedStrings::g_NtdllName.ReEncrypt();
 	
 	// 1. 添加权限检查
 	HANDLE hToken;
@@ -585,6 +756,8 @@ cleanup:
 // 卸载驱动程序  
 BOOL __cdecl UnloadNTDriver(char* szSvrName)
 {
+	ANTI_DEBUG_CHECK();
+
 	BOOL bRet = FALSE;
 	SC_HANDLE hServiceMgr = NULL;	// SCM管理器的句柄
 	SC_HANDLE hServiceDDK = NULL;	// NT驱动程序的服务句柄
