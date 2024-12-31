@@ -16,7 +16,7 @@ class VirtualKeys:
         'pause': 0x13,
         'caps_lock': 0x14,
         'esc': 0x1B,
-        'space': 0x20,
+        'spacebar': 0x20,
         
         # 导航键
         'page_up': 0x21,
@@ -146,7 +146,6 @@ class VirtualKeys:
         '<': 0xBC,  # 与,共用一个键位
         '>': 0xBE,  # 与.共用一个键位
         '?': 0xBF,  # 与/共用一个键位
-        ' ': 0x20,  # 空格键
     }
     
     # 添加需要Shift的字符集合
@@ -158,11 +157,15 @@ class VirtualKeys:
     @classmethod
     def get_code(cls, key):
         """获取虚拟键码，如果不存在返回None"""
+        if key == ' ':  # 空格字符特殊处理
+            return cls.VK_CODE['spacebar']
         return cls.VK_CODE.get(key.lower())
     
     @classmethod
     def is_valid_key(cls, key):
         """检查是否是有效的按键"""
+        if key == ' ':  # 空格字符特殊处理
+            return True
         return key.lower() in cls.VK_CODE
     
     @classmethod
