@@ -12,7 +12,18 @@ import os
 import json
 import sys
 import ctypes
+from ctypes import wintypes
 import argparse
+import win32gui
+
+# 添加 MONITORINFO 结构体定义
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD)
+    ]
 
 # 添加命令行参数解析
 # python gui.py --debug
@@ -35,47 +46,421 @@ class LYKeysGUI:
         if not self.check_privileges():
             sys.exit(0)  # 干净地退出程序
             
-        self.root = tk.Tk()
-        self.root.title("键鼠驱动测试工具")
-        self.root.geometry("1200x710")  # 增加窗口初始大小
-        
-        # 配置根窗口的grid权重
-        self.root.grid_rowconfigure(0, weight=1)
-        self.root.grid_columnconfigure(0, weight=3)  # 左侧控制面板
-        self.root.grid_columnconfigure(1, weight=2)  # 右侧日志区域
-        
-        # 创建左右分栏
-        self.left_panel = ttk.Frame(self.root)
-        self.left_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        
-        self.right_panel = ttk.Frame(self.root)
-        self.right_panel.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
-        
-        # 配置右侧面板的grid权重
-        self.right_panel.grid_rowconfigure(0, weight=1)
-        self.right_panel.grid_columnconfigure(0, weight=1)
-        
-        # 初始化组件
+        # 初始化基本变量
         self.driver_mgr = None  # 驱动管理器
         self.input_tester = None  # 输入测试器
         self.is_driver_loaded = False  # 驱动是否已加载
         self.is_closing = False  # 是否正在关闭程序
+        self.config_file = "driver_config.json"  # 配置文件路径
+            
+        # 创建主窗口
+        self.root = tk.Tk()
+        self.root.title("键鼠驱动测试工具")
+        self.root.geometry("900x800")  # 增加窗口初始大小
         
-        self._setup_logging()   # 设置日志处理器
-        self._create_widgets()  # 创建GUI组件
+        # 设置全局默认字体
+        self.default_font = ('Microsoft YaHei UI', 12)  # 使用微软雅黑UI
+        self.style = ttk.Style()
+        self.style.configure('.', font=self.default_font)
+        
+        # 配置各种ttk部件的字体
+        for widget in ['TLabel', 'TButton', 'TEntry', 'TCheckbutton', 'TRadiobutton']:
+            self.style.configure(widget, font=self.default_font)
+        
+        # 特别配置一些需要单独设置的部件
+        self.style.configure('TLabelframe.Label', font=self.default_font)  # LabelFrame的标题
+        self.style.configure('TNotebook.Tab', font=self.default_font)      # Notebook的标签
+        
+        # 配置根窗口的grid权重
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)  # 整个窗口都可以扩展
+        
+        # 创建PanedWindow
+        self.paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        self.paned.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        
+        # 创建左右分栏
+        self.left_panel = ttk.Frame(self.paned)
+        self.right_panel = ttk.Frame(self.paned)
+        
+        # 将左右面板添加到PanedWindow
+        self.paned.add(self.left_panel, weight=2)  # 左侧占比更大
+        self.paned.add(self.right_panel, weight=3)  # 右侧占比较小
+
+        # 创建标签页
+        self.notebook = ttk.Notebook(self.left_panel)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        # 创建各个标签页
+        self.create_driver_tab()      # 驱动控制标签页
+        self.create_input_test_tab()  # 输入测试标签页
+        self.create_rapid_test_tab()  # 高频测试标签页
+        self.create_mouse_test_tab()  # 鼠标测试标签页
+        
+        # 设置日志处理器
+        self._setup_logging()
         
         # 绑定窗口关闭事件
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         
-        # 配置文件路径
-        self.config_file = "driver_config.json"
-        
-        # 创建路径配置frame
-        self.create_path_frame()
-        
         # 加载保存的路径配置
         self.load_path_config()
-    
+
+    def create_driver_tab(self):
+        """创建驱动控制标签页"""
+        driver_tab = ttk.Frame(self.notebook)
+        self.notebook.add(driver_tab, text="驱动控制")
+
+        # 驱动控制区域
+        driver_frame = ttk.LabelFrame(driver_tab, text="驱动控制", padding="5")
+        driver_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.load_btn = ttk.Button(driver_frame, text="安装驱动", command=self._load_driver)
+        self.load_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.unload_btn = ttk.Button(driver_frame, text="卸载驱动", command=self._unload_driver, state=tk.DISABLED)
+        self.unload_btn.pack(side=tk.LEFT, padx=5)
+        
+        # 状态检查区域
+        status_frame = ttk.LabelFrame(driver_tab, text="驱动状态", padding="5")
+        status_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.driver_status = ttk.Label(status_frame, text="驱动状态: 未知")
+        self.driver_status.pack(fill=tk.X, padx=5, pady=2)
+        
+        self.last_check = ttk.Label(status_frame, text="上次检查: 未检查")
+        self.last_check.pack(fill=tk.X, padx=5, pady=2)
+        
+        self.check_status_btn = ttk.Button(status_frame, text="检查驱动状态", 
+                                       command=self._check_driver_status, 
+                                       state=tk.DISABLED,
+                                       width=15)
+        self.check_status_btn.pack(side=tk.LEFT, padx=5, pady=2)
+
+        # 路径配置区域
+        self.create_path_frame(driver_tab)
+
+    def create_input_test_tab(self):
+        """创建输入测试标签页"""
+        input_tab = ttk.Frame(self.notebook)
+        self.notebook.add(input_tab, text="输入测试")
+
+        # 输入/输出区域
+        io_frame = ttk.LabelFrame(input_tab, text="输入/输出", padding="5")
+        io_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 输入区域
+        input_frame = ttk.LabelFrame(io_frame, text="输入区域", padding="5")
+        input_frame.pack(fill=tk.X, padx=5, pady=(5,2))
+        
+        # 创建固定宽度的输入框
+        self.input_entry = ttk.Entry(input_frame, width=25, font=self.default_font)  # 设置字体
+        self.input_entry.pack(side=tk.LEFT, padx=5, pady=5)
+        self.input_entry.bind('<Return>', self._on_input_submit)
+        
+        # 输入区域按钮
+        button_frame = ttk.Frame(input_frame)
+        button_frame.pack(side=tk.LEFT, padx=5)
+        
+        self.submit_btn = ttk.Button(button_frame, text="发送", command=self._on_submit_click, width=8)
+        self.submit_btn.pack(side=tk.LEFT)
+        
+        self.clear_btn = ttk.Button(button_frame, text="清除", command=self._clear_text, width=8)
+        self.clear_btn.pack(side=tk.LEFT, padx=5)
+        
+        # 输出区域
+        output_frame = ttk.LabelFrame(io_frame, text="输出区域", padding="5")
+        output_frame.pack(fill=tk.X, padx=5, pady=(2,5))
+        
+        # 创建固定宽度的输出框
+        self.output_entry = ttk.Entry(output_frame, state='readonly', width=25, font=self.default_font)  # 设置字体
+        self.output_entry.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # 测试功能区域
+        test_frame = ttk.LabelFrame(input_tab, text="测试功能", padding="5")
+        test_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 创建按钮容器
+        test_button_frame = ttk.Frame(test_frame)
+        test_button_frame.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        self.test_key_btn = ttk.Button(test_button_frame, text="按键测试", 
+                                     command=self._test_keyboard, 
+                                     state=tk.DISABLED, 
+                                     width=15)
+        self.test_key_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.test_input_btn = ttk.Button(test_button_frame, text="输入测试", 
+                                       command=self._test_input, 
+                                       state=tk.DISABLED, 
+                                       width=15)
+        self.test_input_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.test_mouse_btn = ttk.Button(test_button_frame, text="鼠标测试", 
+                                       command=self._test_mouse, 
+                                       state=tk.DISABLED, 
+                                       width=15)
+        self.test_mouse_btn.pack(side=tk.LEFT, padx=5)
+
+    def create_rapid_test_tab(self):
+        """创建高频测试标签页"""
+        rapid_tab = ttk.Frame(self.notebook)
+        self.notebook.add(rapid_tab, text="高频测试")
+
+        # 创建主容器
+        main_container = ttk.Frame(rapid_tab)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # 创建左右分栏
+        settings_container = ttk.Frame(main_container)
+        settings_container.pack(fill=tk.BOTH, expand=True)
+        
+        left_settings = ttk.Frame(settings_container)
+        left_settings.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0,5))
+        
+        right_settings = ttk.Frame(settings_container)
+        right_settings.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5,0))
+
+        # 左侧 - 按键和时间设置
+        # 按键选择
+        key_frame = ttk.LabelFrame(left_settings, text="按键设置", padding="5")
+        key_frame.pack(fill=tk.X, pady=(0,5))
+        
+        ttk.Label(key_frame, text="测试按键:").pack(side=tk.LEFT, padx=5)
+        self.test_key_var = tk.StringVar(value="a")
+        self.test_key_entry = ttk.Entry(key_frame, textvariable=self.test_key_var, width=8, font=self.default_font)
+        self.test_key_entry.pack(side=tk.LEFT, padx=5)
+
+        # 时间设置框架
+        time_frame = ttk.LabelFrame(left_settings, text="时间设置(毫秒)", padding="5")
+        time_frame.pack(fill=tk.X)
+
+        # 按下时间设置
+        press_frame = ttk.Frame(time_frame)
+        press_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(press_frame, text="按下抬起间隔:").pack(side=tk.LEFT, padx=5)
+        self.press_time_var = tk.StringVar(value="1")
+        self.press_time_entry = ttk.Entry(press_frame, textvariable=self.press_time_var, width=8, font=self.default_font)
+        self.press_time_entry.pack(side=tk.LEFT, padx=5)
+
+        # 间隔时间设置
+        interval_frame = ttk.Frame(time_frame)
+        interval_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(interval_frame, text="等待间隔:").pack(side=tk.LEFT, padx=5)
+        self.interval_time_var = tk.StringVar(value="1")
+        self.interval_time_entry = ttk.Entry(interval_frame, textvariable=self.interval_time_var, width=8, font=self.default_font)
+        self.interval_time_entry.pack(side=tk.LEFT, padx=5)
+
+        # 右侧 - 运行时长和状态显示
+        # 运行时长设置
+        duration_frame = ttk.LabelFrame(right_settings, text="运行设置", padding="5")
+        duration_frame.pack(fill=tk.X, pady=(0,5))
+        
+        ttk.Label(duration_frame, text="运行时长(秒):").pack(side=tk.LEFT, padx=5)
+        self.duration_var = tk.StringVar(value="0")
+        self.duration_entry = ttk.Entry(duration_frame, textvariable=self.duration_var, width=8, font=self.default_font)
+        self.duration_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Label(duration_frame, text="(0表示无限运行)").pack(side=tk.LEFT, padx=5)
+
+        # 状态显示框架
+        status_frame = ttk.LabelFrame(right_settings, text="运行状态", padding="5")
+        status_frame.pack(fill=tk.X)
+
+        # 创建左右两列的容器
+        status_left = ttk.Frame(status_frame)
+        status_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        
+        status_right = ttk.Frame(status_frame)
+        status_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+
+        # 左列 - 状态和运行时间
+        self.rapid_test_status = ttk.Label(status_left, text="状态: 未开始")
+        self.rapid_test_status.pack(fill=tk.X, pady=2)
+        
+        self.run_time_label = ttk.Label(status_left, text="运行时间: 0秒")
+        self.run_time_label.pack(fill=tk.X, pady=2)
+        
+        # 右列 - 按键次数和频率
+        self.press_count = 0
+        self.press_count_label = ttk.Label(status_right, text="按键次数: 0")
+        self.press_count_label.pack(fill=tk.X, pady=2)
+        
+        self.click_rate_label = ttk.Label(status_right, text="平均频率: 0次/秒")
+        self.click_rate_label.pack(fill=tk.X, pady=2)
+
+        # 控制按钮 - 垂直布局
+        control_frame = ttk.Frame(main_container)
+        control_frame.pack(fill=tk.X, pady=(10,0))
+        
+        # 创建一个容器来居中放置按钮
+        button_container = ttk.Frame(control_frame)
+        button_container.pack(anchor=tk.CENTER)
+        
+        self.rapid_test_btn = ttk.Button(button_container, 
+                                       text="开始测试", 
+                                       command=self._toggle_rapid_test, 
+                                       width=15)
+        self.rapid_test_btn.pack(pady=5)
+
+    def create_mouse_test_tab(self):
+        """创建鼠标测试标签页"""
+        mouse_tab = ttk.Frame(self.notebook)
+        self.notebook.add(mouse_tab, text="鼠标测试")
+
+        # 创建主容器
+        main_container = ttk.Frame(mouse_tab)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # 鼠标点击测试区域
+        click_frame = ttk.LabelFrame(main_container, text="鼠标点击测试")
+        click_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 基本按键测试
+        basic_click_frame = ttk.Frame(click_frame)
+        basic_click_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 创建按钮容器并居中
+        button_container = ttk.Frame(basic_click_frame)
+        button_container.pack(anchor=tk.CENTER)
+        
+        # 鼠标按键测试按钮 - 2x2布局
+        click_buttons = [
+            ("左键点击", "left"),
+            ("右键点击", "right"),
+            ("中键点击", "middle"),
+            ("X1键点击", "x1")
+        ]
+        
+        for i, (btn_text, btn_cmd) in enumerate(click_buttons):
+            row = i // 2  # 整除得到行号
+            col = i % 2   # 取余得到列号
+            btn = ttk.Button(button_container, 
+                           text=btn_text, 
+                           command=lambda cmd=btn_cmd: self._test_mouse_click(cmd),
+                           width=15)
+            btn.grid(row=row, column=col, padx=5, pady=2)
+            
+        # X2键点击按钮单独放在下面居中
+        ttk.Button(button_container, 
+                  text="X2键点击", 
+                  command=lambda: self._test_mouse_click("x2"),
+                  width=15).grid(row=2, column=0, columnspan=2, padx=5, pady=2)
+
+        # 鼠标移动测试区域
+        move_frame = ttk.LabelFrame(main_container, text="鼠标移动测试")
+        move_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 移动到四角的按钮
+        corner_frame = ttk.LabelFrame(move_frame, text="移动到屏幕角落")
+        corner_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 创建按钮容器并居中
+        corner_button_container = ttk.Frame(corner_frame)
+        corner_button_container.pack(anchor=tk.CENTER)
+        
+        # 四角移动按钮 - 2x2布局
+        corner_buttons = [
+            ("左上角", "top_left"),
+            ("右上角", "top_right"),
+            ("左下角", "bottom_left"),
+            ("右下角", "bottom_right")
+        ]
+        
+        for i, (btn_text, btn_cmd) in enumerate(corner_buttons):
+            row = i // 2  # 整除得到行号
+            col = i % 2   # 取余得到列号
+            btn = ttk.Button(corner_button_container, 
+                           text=btn_text, 
+                           command=lambda cmd=btn_cmd: self._move_to_corner(cmd),
+                           width=15)
+            btn.grid(row=row, column=col, padx=5, pady=2)
+
+        # 相对移动测试
+        rel_move_frame = ttk.LabelFrame(move_frame, text="相对平滑移动测试")
+        rel_move_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 相对移动距离设置
+        distance_frame = ttk.Frame(rel_move_frame)
+        distance_frame.pack(anchor=tk.CENTER, pady=5)
+        
+        ttk.Label(distance_frame, text="移动距离:").pack(side=tk.LEFT, padx=5)
+        self.rel_distance_var = tk.StringVar(value="100")
+        ttk.Entry(distance_frame, textvariable=self.rel_distance_var, width=8, font=self.default_font).pack(side=tk.LEFT, padx=5)
+
+        # 相对移动方向按钮
+        direction_frame = ttk.Frame(rel_move_frame)
+        direction_frame.pack(anchor=tk.CENTER, pady=5)
+        
+        # 上方向按钮
+        ttk.Button(direction_frame, text="↑", 
+                  command=lambda: self._test_smooth_move_rel("up"),
+                  width=8).pack(pady=2)
+        
+        # 左右方向按钮
+        lr_frame = ttk.Frame(direction_frame)
+        lr_frame.pack(pady=2)
+        ttk.Button(lr_frame, text="←", 
+                  command=lambda: self._test_smooth_move_rel("left"),
+                  width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(lr_frame, text="→", 
+                  command=lambda: self._test_smooth_move_rel("right"),
+                  width=8).pack(side=tk.LEFT, padx=2)
+        
+        # 下方向按钮
+        ttk.Button(direction_frame, text="↓", 
+                  command=lambda: self._test_smooth_move_rel("down"),
+                  width=8).pack(pady=2)
+
+        # 绝对移动测试
+        abs_move_frame = ttk.LabelFrame(move_frame, text="绝对平滑移动测试")
+        abs_move_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 目标坐标设置
+        coords_frame = ttk.Frame(abs_move_frame)
+        coords_frame.pack(anchor=tk.CENTER, pady=5)
+        
+        ttk.Label(coords_frame, text="X:").pack(side=tk.LEFT, padx=5)
+        self.abs_x_var = tk.StringVar(value="500")
+        ttk.Entry(coords_frame, textvariable=self.abs_x_var, width=8, font=self.default_font).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(coords_frame, text="Y:").pack(side=tk.LEFT, padx=5)
+        self.abs_y_var = tk.StringVar(value="500")
+        ttk.Entry(coords_frame, textvariable=self.abs_y_var, width=8, font=self.default_font).pack(side=tk.LEFT, padx=5)
+
+        # 移动按钮
+        move_button_frame = ttk.Frame(abs_move_frame)
+        move_button_frame.pack(anchor=tk.CENTER, pady=5)
+        
+        ttk.Button(move_button_frame, 
+                  text="移动到指定位置", 
+                  command=self._test_smooth_move_abs,
+                  width=20).pack()
+
+        # 鼠标滚轮测试区域
+        wheel_frame = ttk.LabelFrame(main_container, text="鼠标滚轮测试")
+        wheel_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 滚动量设置
+        wheel_settings_frame = ttk.Frame(wheel_frame)
+        wheel_settings_frame.pack(anchor=tk.CENTER, pady=5)
+        
+        ttk.Label(wheel_settings_frame, text="滚动量:").pack(side=tk.LEFT, padx=5)
+        self.wheel_delta_var = tk.StringVar(value="120")
+        ttk.Entry(wheel_settings_frame, textvariable=self.wheel_delta_var, width=8, font=self.default_font).pack(side=tk.LEFT, padx=5)
+
+        # 滚轮测试按钮
+        wheel_button_frame = ttk.Frame(wheel_frame)
+        wheel_button_frame.pack(anchor=tk.CENTER, pady=5)
+        
+        ttk.Button(wheel_button_frame, 
+                  text="向上滚动", 
+                  command=lambda: self._test_mouse_wheel("up"),
+                  width=15).pack(pady=2)
+        ttk.Button(wheel_button_frame, 
+                  text="向下滚动", 
+                  command=lambda: self._test_mouse_wheel("down"),
+                  width=15).pack(pady=2)
+
     def _on_closing(self):
         """处理窗口关闭事件"""
         self.is_closing = True  # 设置关闭标志
@@ -107,20 +492,25 @@ class LYKeysGUI:
         
         # 创建日志区域（放在右侧面板）
         self.log_frame = ttk.LabelFrame(self.right_panel, text="日志输出")
-        self.log_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        self.log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # 配置日志框架的grid权重
         self.log_frame.grid_rowconfigure(0, weight=1)
         self.log_frame.grid_columnconfigure(0, weight=1)
         
         # 创建文本框和滚动条
-        self.log_text = tk.Text(self.log_frame, wrap=tk.WORD)
+        self.log_text = tk.Text(self.log_frame, wrap=tk.WORD, width=50)  # 设置初始大小
         self.log_scrollbar = ttk.Scrollbar(self.log_frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=self.log_scrollbar.set)
         
+        # 设置文本框样式
+        self.log_text.configure(font=self.default_font)  # 使用全局字体
+        # self.log_text.configure(background='#f0f0f0')   # 设置背景色
+        # self.log_text.configure(foreground='#333333')   # 设置文字颜色
+        
         # 放置文本框和滚动条
-        self.log_text.grid(row=0, column=0, sticky="nsew")
-        self.log_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.log_text.grid(row=0, column=0, sticky="nsew", padx=(5,0), pady=5)  # 添加内边距
+        self.log_scrollbar.grid(row=0, column=1, sticky="ns", pady=5)
         
         # 配置日志处理
         handler = TextHandler(self.log_text, self)
@@ -128,158 +518,6 @@ class LYKeysGUI:
         handler.setFormatter(formatter)
         logging.getLogger().addHandler(handler)
         logging.getLogger().setLevel(logging.INFO)
-    
-    def _create_widgets(self):
-        """创建GUI组件"""
-        # 所有组件都放在左侧面板中
-        # 驱动控制区域
-        driver_frame = ttk.LabelFrame(self.left_panel, text="驱动控制", padding="5")
-        driver_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        self.load_btn = ttk.Button(driver_frame, text="安装驱动", command=self._load_driver)
-        self.load_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.unload_btn = ttk.Button(driver_frame, text="卸载驱动", command=self._unload_driver, state=tk.DISABLED)
-        self.unload_btn.pack(side=tk.LEFT, padx=5)
-        
-        # 状态检查区域
-        status_frame = ttk.LabelFrame(self.left_panel, text="驱动状态", padding="5")
-        status_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        # 状态显示标签
-        self.driver_status = ttk.Label(status_frame, text="驱动状态: 未知")
-        self.driver_status.pack(side=tk.LEFT, padx=5, pady=2)
-        
-        self.last_check = ttk.Label(status_frame, text="上次检查: 未检查")
-        self.last_check.pack(side=tk.LEFT, padx=5, pady=2)
-        
-        # 状态检查按钮
-        self.check_status_btn = ttk.Button(status_frame, text="检查驱动状态", 
-                                       command=self._check_driver_status, state=tk.DISABLED)
-        self.check_status_btn.pack(side=tk.RIGHT, padx=5)
-        
-        # 输入/输出区域
-        io_frame = ttk.LabelFrame(self.left_panel, text="输入/输出", padding="5")
-        io_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        # 左侧输入区域
-        input_frame = ttk.Frame(io_frame)
-        input_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        ttk.Label(input_frame, text="输入文本:").pack(side=tk.TOP, anchor=tk.W)
-        self.input_entry = ttk.Entry(input_frame)
-        self.input_entry.pack(side=tk.TOP, fill=tk.X, padx=5, pady=2)
-        self.input_entry.bind('<Return>', self._on_input_submit)
-        
-        # 右侧输出区域
-        output_frame = ttk.Frame(io_frame)
-        output_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        ttk.Label(output_frame, text="模拟输入结果:").pack(side=tk.TOP, anchor=tk.W)
-        self.output_entry = ttk.Entry(output_frame, state='readonly')
-        self.output_entry.pack(side=tk.TOP, fill=tk.X, padx=5, pady=2)
-        
-        # 按钮区域
-        button_frame = ttk.Frame(io_frame)
-        button_frame.pack(side=tk.LEFT, padx=5)
-        
-        self.submit_btn = ttk.Button(button_frame, text="发送", command=self._on_submit_click)
-        self.submit_btn.pack(side=tk.TOP, pady=2)
-        
-        self.clear_btn = ttk.Button(button_frame, text="清除", command=self._clear_text)
-        self.clear_btn.pack(side=tk.TOP, pady=2)
-        
-        # 测试功能区域
-        test_frame = ttk.LabelFrame(self.left_panel, text="测试功能", padding="5")
-        test_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        self.test_key_btn = ttk.Button(test_frame, text="按键测试", command=self._test_keyboard, state=tk.DISABLED)
-        self.test_key_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.test_input_btn = ttk.Button(test_frame, text="输入测试", command=self._test_input, state=tk.DISABLED)
-        self.test_input_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.test_mouse_btn = ttk.Button(test_frame, text="鼠标测试", command=self._test_mouse, state=tk.DISABLED)
-        self.test_mouse_btn.pack(side=tk.LEFT, padx=5)
-        
-        # 高频按键测试区域
-        rapid_test_frame = ttk.LabelFrame(self.left_panel, text="高频按键测试", padding="5")
-        rapid_test_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        # 第一行：按键和时间设置
-        # 按键选择
-        ttk.Label(rapid_test_frame, text="测试按键:").grid(row=0, column=0, sticky="w", padx=5)
-        self.test_key_var = tk.StringVar(value="a")  # 默认测试a键
-        self.test_key_entry = ttk.Entry(rapid_test_frame, textvariable=self.test_key_var, width=10)
-        self.test_key_entry.grid(row=0, column=1, sticky="w", padx=5)
-        
-        # 按下时间设置
-        ttk.Label(rapid_test_frame, text="按下时间(ms):").grid(row=0, column=2, sticky="w", padx=5)
-        self.press_time_var = tk.StringVar(value="50")  # 默认50ms
-        self.press_time_entry = ttk.Entry(rapid_test_frame, textvariable=self.press_time_var, width=10)
-        self.press_time_entry.grid(row=0, column=3, sticky="w", padx=5)
-        
-        # 间隔时间设置
-        ttk.Label(rapid_test_frame, text="间隔时间(ms):").grid(row=0, column=4, sticky="w", padx=5)
-        self.interval_time_var = tk.StringVar(value="50")  # 默认50ms
-        self.interval_time_entry = ttk.Entry(rapid_test_frame, textvariable=self.interval_time_var, width=10)
-        self.interval_time_entry.grid(row=0, column=5, sticky="w", padx=5)
-        
-        # 第二行：运行时长设置
-        ttk.Label(rapid_test_frame, text="运行时长(秒):").grid(row=1, column=0, sticky="w", padx=5)
-        self.duration_var = tk.StringVar(value="0")  # 默认0秒，表示无限运行
-        self.duration_entry = ttk.Entry(rapid_test_frame, textvariable=self.duration_var, width=10)
-        self.duration_entry.grid(row=1, column=1, sticky="w", padx=5)
-        ttk.Label(rapid_test_frame, text="(0表示无限运行)").grid(row=1, column=2, sticky="w", padx=5)
-        
-        # 控制按钮
-        self.rapid_test_btn = ttk.Button(rapid_test_frame, text="开始测试", command=self._toggle_rapid_test)
-        self.rapid_test_btn.grid(row=1, column=5, columnspan=2, padx=5)
-        
-        # 第三行：状态显示
-        status_frame = ttk.Frame(rapid_test_frame)
-        status_frame.grid(row=2, column=0, columnspan=7, sticky="ew", padx=5, pady=5)
-        
-        # 测试状态
-        self.rapid_test_status = ttk.Label(status_frame, text="状态: 未开始")
-        self.rapid_test_status.pack(side=tk.LEFT)
-        
-        # 运行时间
-        self.run_time_label = ttk.Label(status_frame, text="运行时间: 0秒")
-        self.run_time_label.pack(side=tk.LEFT, padx=20)
-        
-        # 按键次数
-        self.press_count = 0
-        self.press_count_label = ttk.Label(status_frame, text="按键次数: 0")
-        self.press_count_label.pack(side=tk.LEFT, padx=20)
-        
-        # 点击频率
-        self.click_rate_label = ttk.Label(status_frame, text="平均频率: 0次/秒")
-        self.click_rate_label.pack(side=tk.LEFT, padx=20)
-        
-        # 鼠标按键测试区域
-        mouse_buttons_frame = ttk.LabelFrame(self.left_panel, text="鼠标按键测试")
-        mouse_buttons_frame.pack(padx=5, pady=5, fill="x")
-
-        # 鼠标按键测试按钮
-        ttk.Button(mouse_buttons_frame, text="左键点击", command=lambda: self._test_mouse_click("left")).pack(side="left", padx=5, pady=5)
-        ttk.Button(mouse_buttons_frame, text="右键点击", command=lambda: self._test_mouse_click("right")).pack(side="left", padx=5, pady=5)
-        ttk.Button(mouse_buttons_frame, text="中键点击", command=lambda: self._test_mouse_click("middle")).pack(side="left", padx=5, pady=5)
-        ttk.Button(mouse_buttons_frame, text="X1键点击", command=lambda: self._test_mouse_click("x1")).pack(side="left", padx=5, pady=5)
-        ttk.Button(mouse_buttons_frame, text="X2键点击", command=lambda: self._test_mouse_click("x2")).pack(side="left", padx=5, pady=5)
-
-        # 鼠标滚轮测试区域
-        mouse_wheel_frame = ttk.LabelFrame(self.left_panel, text="鼠标滚轮测试")
-        mouse_wheel_frame.pack(padx=5, pady=5, fill="x")
-
-        # 滚轮测试按钮
-        ttk.Button(mouse_wheel_frame, text="向上滚动", command=lambda: self._test_mouse_wheel("up")).pack(side="left", padx=5, pady=5)
-        ttk.Button(mouse_wheel_frame, text="向下滚动", command=lambda: self._test_mouse_wheel("down")).pack(side="left", padx=5, pady=5)
-
-        # 滚动量输入框
-        self.wheel_delta_var = tk.StringVar(value="120")
-        ttk.Label(mouse_wheel_frame, text="滚动量:").pack(side="left", padx=5, pady=5)
-        ttk.Entry(mouse_wheel_frame, textvariable=self.wheel_delta_var, width=5).pack(side="left", padx=5, pady=5)
     
     def _update_button_states(self, driver_loaded):
         """更新按钮状态"""
@@ -363,6 +601,8 @@ class LYKeysGUI:
         """测试输入固定字符串"""
         def run_test():
             try:
+                logging.info("输入测试3s后开始!")
+                time.sleep(3)
                 test_string = "Hello, World!"
                 logging.info(f"测试输入: {test_string}")
                 
@@ -385,8 +625,8 @@ class LYKeysGUI:
         """测试鼠标移动"""
         def run_test():
             try:
-                logging.info("开始鼠标测试...")
-                time.sleep(1)  # 给用户准备时间
+                logging.info("鼠标测试3s后开始!")
+                time.sleep(3)  # 给用户准备时间
                 
                 # 1. 相对移动测试
                 logging.info("=== 开始相对移动测试 ===")
@@ -460,7 +700,7 @@ class LYKeysGUI:
                     
                     # 在每个显示器上进行测试
                     def enum_monitor_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
-                        monitor_info = ctypes.wintypes.MONITORINFO()
+                        monitor_info = MONITORINFO()
                         monitor_info.cbSize = ctypes.sizeof(monitor_info)
                         ctypes.windll.user32.GetMonitorInfoW(hMonitor, ctypes.byref(monitor_info))
                         
@@ -480,7 +720,7 @@ class LYKeysGUI:
                         ctypes.c_bool,
                         ctypes.c_ulong,
                         ctypes.c_ulong,
-                        ctypes.POINTER(ctypes.wintypes.RECT),
+                        ctypes.POINTER(MONITORINFO),
                         ctypes.c_ulong
                     )
                     
@@ -622,22 +862,30 @@ class LYKeysGUI:
         
         threading.Thread(target=check, daemon=True).start()
     
-    def create_path_frame(self):
-        """创建路径配置区域"""
-        path_frame = ttk.LabelFrame(self.left_panel, text="驱动路径配置", padding="5")
+    def create_path_frame(self, parent=None):
+        """创建路径配置区域
+        
+        Args:
+            parent: 父级容器，如果为None则使用self.left_panel
+        """
+        # 如果没有指定父级容器，则使用left_panel
+        if parent is None:
+            parent = self.left_panel
+            
+        path_frame = ttk.LabelFrame(parent, text="驱动路径配置", padding="5")
         path_frame.pack(fill="x", padx=5, pady=5)
         
         # DLL路径配置
         ttk.Label(path_frame, text="DLL路径:").grid(row=0, column=0, sticky="w")
         self.dll_path_var = tk.StringVar()
-        self.dll_path_entry = ttk.Entry(path_frame, textvariable=self.dll_path_var, width=50)
+        self.dll_path_entry = ttk.Entry(path_frame, textvariable=self.dll_path_var, width=30, font=self.default_font)
         self.dll_path_entry.grid(row=0, column=1, padx=5)
         ttk.Button(path_frame, text="浏览", command=lambda: self.browse_file("dll")).grid(row=0, column=2)
         
         # SYS路径配置
         ttk.Label(path_frame, text="SYS路径:").grid(row=1, column=0, sticky="w")
         self.sys_path_var = tk.StringVar()
-        self.sys_path_entry = ttk.Entry(path_frame, textvariable=self.sys_path_var, width=50)
+        self.sys_path_entry = ttk.Entry(path_frame, textvariable=self.sys_path_var, width=30, font=self.default_font)
         self.sys_path_entry.grid(row=1, column=1, padx=5)
         ttk.Button(path_frame, text="浏览", command=lambda: self.browse_file("sys")).grid(row=1, column=2)
         
@@ -695,8 +943,8 @@ class LYKeysGUI:
                 rapid_test_config = config.get("rapid_test", {})
                 if rapid_test_config:
                     self.test_key_var.set(rapid_test_config.get("test_key", "a"))
-                    self.press_time_var.set(rapid_test_config.get("press_time", "50"))
-                    self.interval_time_var.set(rapid_test_config.get("interval_time", "50"))
+                    self.press_time_var.set(rapid_test_config.get("press_time", "10"))
+                    self.interval_time_var.set(rapid_test_config.get("interval_time", "10"))
                     self.duration_var.set(rapid_test_config.get("duration", "0"))
                     logging.info("已加载高频按键测试配置")
                     
@@ -817,6 +1065,7 @@ class LYKeysGUI:
             # 初始化计时和计数
             start_time = time.perf_counter()  # 使用高精度计时器
             last_update_time = start_time
+            last_press_time = start_time
             
             while self.rapid_test_running and self.is_driver_loaded:
                 current_time = time.perf_counter()
@@ -844,8 +1093,9 @@ class LYKeysGUI:
                 if not self.input_tester.key_down(key):
                     raise RuntimeError("按键按下失败")
                 
-                # 等待按下时间
-                time.sleep(press_time)
+                # 使用高精度计时器等待按下时间
+                while time.perf_counter() - current_time < press_time:
+                    pass
                 
                 # 释放按键
                 if not self.input_tester.key_up(key):
@@ -855,8 +1105,9 @@ class LYKeysGUI:
                 self.press_count += 1
                 self.root.after(0, self._update_press_count)
                 
-                # 等待间隔时间
-                time.sleep(interval_time)
+                # 使用高精度计时器等待间隔时间
+                while time.perf_counter() - current_time < (press_time + interval_time):
+                    pass
                 
         except Exception as e:
             self.rapid_test_running = False
@@ -1079,6 +1330,156 @@ class LYKeysGUI:
 
         # 使用新线程运行滚轮测试，避免阻塞GUI
         threading.Thread(target=run_test, daemon=True).start()
+
+    def _move_to_corner(self, corner: str) -> None:
+        """移动鼠标到主显示器的四角
+        
+        Args:
+            corner: 目标角落，可选值："top_left", "top_right", "bottom_left", "bottom_right"
+        """
+        def run_move():
+            try:
+                # 检查驱动状态
+                if not self.is_driver_loaded or not self.input_tester:
+                    logging.error("驱动未加载或测试器未初始化")
+                    messagebox.showerror("错误", "请先加载驱动")
+                    return
+
+                # 获取主显示器信息
+                screen_width = ctypes.windll.user32.GetSystemMetrics(0)   # SM_CXSCREEN
+                screen_height = ctypes.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN
+
+                # 设置边缘偏移量（避免完全处于边缘）
+                EDGE_OFFSET = 1
+
+                # 根据选择的角落确定目标坐标
+                if corner == "top_left":
+                    target_x, target_y = EDGE_OFFSET, EDGE_OFFSET
+                    corner_name = "左上角"
+                elif corner == "top_right":
+                    target_x, target_y = screen_width - EDGE_OFFSET, EDGE_OFFSET
+                    corner_name = "右上角"
+                elif corner == "bottom_left":
+                    target_x, target_y = EDGE_OFFSET, screen_height - EDGE_OFFSET
+                    corner_name = "左下角"
+                else:  # bottom_right
+                    target_x, target_y = screen_width - EDGE_OFFSET, screen_height - EDGE_OFFSET
+                    corner_name = "右下角"
+
+                logging.info(f"移动鼠标到主显示器{corner_name}: ({target_x}, {target_y})")
+                self.input_tester.mouse_move_abs(target_x, target_y)
+
+            except Exception as e:
+                logging.error(f"移动到{corner_name}失败: {str(e)}")
+                messagebox.showerror("错误", f"移动到{corner_name}失败: {str(e)}")
+
+        # 在新线程中运行移动操作
+        threading.Thread(target=run_move, daemon=True).start()
+
+    def _test_smooth_move_rel(self, direction: str) -> None:
+        """测试相对平滑移动
+        
+        Args:
+            direction: 移动方向，可选值："left", "right", "up", "down"
+        """
+        def run_test():
+            try:
+                # 检查驱动状态
+                if not self.is_driver_loaded or not self.input_tester:
+                    logging.error("驱动未加载或测试器未初始化")
+                    messagebox.showerror("错误", "请先加载驱动")
+                    return
+
+                # 获取移动距离
+                distance = int(self.rel_distance_var.get())
+                if distance <= 0:
+                    logging.error(f"无效的移动距离: {distance}")
+                    messagebox.showerror("错误", "移动距离必须大于0")
+                    return
+
+                # 根据方向设置移动参数
+                dx, dy = 0, 0
+                if direction == "left":
+                    dx = -distance
+                elif direction == "right":
+                    dx = distance
+                elif direction == "up":
+                    dy = -distance
+                else:  # down
+                    dy = distance
+
+                logging.info(f"开始相对平滑移动测试 - 方向: {direction}, 距离: {distance}")
+                
+                # 执行平滑移动
+                STEPS = 10  # 将移动分成10步
+                step_x = dx / STEPS
+                step_y = dy / STEPS
+                
+                for _ in range(STEPS):
+                    self.input_tester.mouse_move_rel(int(step_x), int(step_y))
+                    time.sleep(0.02)  # 20ms的延迟使移动更平滑
+                    
+                logging.info("相对平滑移动完成")
+
+            except ValueError as ve:
+                logging.error(f"数值转换错误: {str(ve)}")
+                messagebox.showerror("错误", "请输入有效的移动距离")
+            except Exception as e:
+                logging.error(f"相对平滑移动测试出错: {str(e)}")
+                messagebox.showerror("错误", f"相对平滑移动测试出错: {str(e)}")
+
+        # 在新线程中运行测试
+        threading.Thread(target=run_test, daemon=True).start()
+
+    def _test_smooth_move_abs(self) -> None:
+        """测试绝对平滑移动"""
+        def run_test():
+            try:
+                # 检查驱动状态
+                if not self.is_driver_loaded or not self.input_tester:
+                    logging.error("驱动未加载或测试器未初始化")
+                    messagebox.showerror("错误", "请先加载驱动")
+                    return
+
+                # 获取目标坐标
+                target_x = int(self.abs_x_var.get())
+                target_y = int(self.abs_y_var.get())
+
+                # 获取当前鼠标位置
+                cursor = win32gui.GetCursorPos()
+                start_x, start_y = cursor[0], cursor[1]
+
+                # 计算移动距离
+                dx = target_x - start_x
+                dy = target_y - start_y
+
+                logging.info(f"开始绝对平滑移动测试 - 目标位置: ({target_x}, {target_y})")
+                
+                # 执行平滑移动
+                STEPS = 20  # 将移动分成20步
+                for i in range(STEPS + 1):
+                    # 使用缓动函数使移动更自然
+                    progress = i / STEPS
+                    eased_progress = progress * (2 - progress)  # 二次缓动
+                    
+                    current_x = int(start_x + dx * eased_progress)
+                    current_y = int(start_y + dy * eased_progress)
+                    
+                    self.input_tester.mouse_move_abs(current_x, current_y)
+                    time.sleep(0.01)  # 10ms的延迟使移动更平滑
+                    
+                logging.info("绝对平滑移动完成")
+
+            except ValueError as ve:
+                logging.error(f"数值转换错误: {str(ve)}")
+                messagebox.showerror("错误", "请输入有效的坐标值")
+            except Exception as e:
+                logging.error(f"绝对平滑移动测试出错: {str(e)}")
+                messagebox.showerror("错误", f"绝对平滑移动测试出错: {str(e)}")
+
+        # 在新线程中运行测试
+        threading.Thread(target=run_test, daemon=True).start()
+
 
 if __name__ == '__main__':
     try:
