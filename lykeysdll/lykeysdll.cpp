@@ -10,10 +10,12 @@
 #include <sysinfoapi.h>
 #include <time.h>
 #include <TlHelp32.h>
+#include <cmath>
 
 // 使用std命名空间中的min和max
 using std::min;
 using std::max;
+using std::abs;
 
 // 字符串加密宏和常量
 #define XSTR_SEED (0x11223344 ^ 0xABCDEF12)  // 更复杂的种子
@@ -500,41 +502,108 @@ void __cdecl MouseMiddleButtonUp()
 // 鼠标相对移动
 void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
 {
-	MOUSE_INPUT_DATA  mid;
+	if (!IsMouseReady()) {
+		return;
+	}
+
+	MOUSE_INPUT_DATA mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
+	
+	// 设置相对移动标志
 	mid.Flags = MOUSE_MOVE_RELATIVE;
-	mid.LastX = dx;
-	mid.LastY = dy;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	
+	// 1. 微小移动精确处理
+	const float PRECISION_THRESHOLD = 10.0f;  // 精确移动阈值（像素）
+	const int MAX_STEPS = 5;                  // 最大分步数
+	const float MIN_STEP_TIME = 0.5f;         // 最小步进时间（毫秒）
+	
+	// 计算移动距离
+	float distance = std::sqrt(static_cast<float>(dx * dx + dy * dy));
+	
+	if (distance < PRECISION_THRESHOLD) {
+		// 对于微小移动，直接发送以保持精确性
+		mid.LastX = dx;
+		mid.LastY = dy;
+		DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	} else {
+		// 对于较大移动，进行分步处理以保持平滑性
+		int steps = (std::min)((int)(distance / PRECISION_THRESHOLD), MAX_STEPS);
+		float stepX = (float)dx / steps;
+		float stepY = (float)dy / steps;
+		
+		// 计算每步的剩余量
+		float remainderX = dx - (stepX * steps);
+		float remainderY = dy - (stepY * steps);
+		
+		// 分步发送移动指令
+		for (int i = 0; i < steps; i++) {
+			mid.LastX = (LONG)stepX;
+			mid.LastY = (LONG)stepY;
+			DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+			
+			// 添加极短暂的延迟以确保平滑性，但不影响响应速度
+			Sleep(0);  // 让出时间片但不实际等待
+		}
+		
+		// 处理剩余的小数部分
+		if (remainderX != 0 || remainderY != 0) {
+			mid.LastX = (LONG)remainderX;
+			mid.LastY = (LONG)remainderY;
+			DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+		}
+	}
 }
 
 // 鼠标绝对移动
 void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy)
 {
-	MOUSE_INPUT_DATA  mid;
+	if (!IsMouseReady()) {
+		return;
+	}
+
+	MOUSE_INPUT_DATA mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
+
+	// 获取主显示器信息
+	const LONG screenWidth = GetSystemMetrics(SM_CXSCREEN);
+	const LONG screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+	// 边界检查和调整
+	LONG adjustedX = (std::max)(0L, (std::min)(dx, screenWidth - 1));
+	LONG adjustedY = (std::max)(0L, (std::min)(dy, screenHeight - 1));
+
+	// 1. 设置绝对移动标志
 	mid.Flags = MOUSE_MOVE_ABSOLUTE;
 
-	// 获取虚拟屏幕的尺寸和位置
-	int virtualScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-	int virtualScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-	int virtualScreenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
-	int virtualScreenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+	// 2. 非线性插值优化
+	// 在屏幕中心区域提供更高的精度，边缘区域提供更快的转向
+	const float CENTER_ZONE = 0.3f;  // 中心区域范围（屏幕宽度的比例）
+	const float CENTER_WEIGHT = 0.7f; // 中心区域权重
 
-	// 将输入坐标调整为相对于虚拟屏幕的坐标
-	LONG adjustedX = dx - virtualScreenX;
-	LONG adjustedY = dy - virtualScreenY;
+	// 计算到屏幕中心的距离
+	float centerX = screenWidth / 2.0f;
+	float centerY = screenHeight / 2.0f;
+	float distanceX = std::abs(adjustedX - centerX) / centerX;
+	float distanceY = std::abs(adjustedY - centerY) / centerY;
 
-	// 确保坐标在有效范围内
-	adjustedX = (adjustedX < 0) ? 0 : ((adjustedX > virtualScreenWidth) ? virtualScreenWidth : adjustedX);
-	adjustedY = (adjustedY < 0) ? 0 : ((adjustedY > virtualScreenHeight) ? virtualScreenHeight : adjustedY);
+	// 应用非线性插值
+	float scaleX = (distanceX < CENTER_ZONE) ? 
+		(CENTER_WEIGHT + (1.0f - CENTER_WEIGHT) * (distanceX / CENTER_ZONE)) : 1.0f;
+	float scaleY = (distanceY < CENTER_ZONE) ? 
+		(CENTER_WEIGHT + (1.0f - CENTER_WEIGHT) * (distanceY / CENTER_ZONE)) : 1.0f;
 
-	// 将坐标映射到0xFFFF范围
-	mid.LastX = (LONG)((float)adjustedX * 65535.0f / (float)virtualScreenWidth);
-	mid.LastY = (LONG)((float)adjustedY * 65535.0f / (float)virtualScreenHeight);
+	// 3. 坐标转换（使用64位整数避免溢出）
+	// 将屏幕坐标映射到0-65535范围，考虑中心区域权重
+	mid.LastX = (LONG)(((INT64)adjustedX * 65535 * scaleX) / screenWidth);
+	mid.LastY = (LONG)(((INT64)adjustedY * 65535 * scaleY) / screenHeight);
 
+	// 4. 确保最终坐标在有效范围内
+	mid.LastX = (std::max)(0L, (std::min)(mid.LastX, 65535L));
+	mid.LastY = (std::max)(0L, (std::min)(mid.LastY, 65535L));
+
+	// 5. 发送移动命令
 	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
