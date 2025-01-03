@@ -1,4 +1,6 @@
 # Prerequisites
+__pycache__/
+*.pyc
 *.d
 .vs/
 x64/
@@ -6,7 +8,7 @@ x64/
 .vscode/
 dll/
 *.log
-__pycache__/
+.idea/
 
 # Compiled Object files
 *.slo
