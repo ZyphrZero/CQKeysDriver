@@ -54,7 +54,7 @@ class LYKeysGUI:
             
         # 创建主窗口（必须最先创建）
         self.root = tk.Tk()
-        self.root.title("键鼠驱动测试工具")
+        self.root.title("LingYaoDriver测试工具")
         self.root.geometry("1000x1000")
         
         # 初始化基本变量

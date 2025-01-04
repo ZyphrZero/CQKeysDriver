@@ -11,9 +11,6 @@ bcdedit /set testsigning on
 shutdown  -r -t 0
 ```
 
-sc query lykeys
-sc stop lykeys
-
 2. 重启后**管理员身份**运行Python脚本  
   - 使用`pip`或`conda`安装win32gui库  
     `conda install win32gui`  
