@@ -888,9 +888,6 @@ BOOL __cdecl UnloadNTDriver(char* szSvrName)
 		DWORD startTime = GetTickCount();
 		while (status.dwCurrentState != SERVICE_STOPPED) {
 			Sleep(50); // 短暂等待
-			
-			Sleep(50); // 短暂等待
-			
 			if (!QueryServiceStatus(hServiceDDK, &status)) {
 				break;
 			}

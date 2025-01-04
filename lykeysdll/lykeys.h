@@ -6,6 +6,14 @@
 #define METHOD_BUFFERED                 0
 #endif
 
+#ifdef LYKEYSDLL_EXPORTS
+#define LYKEYSDLL_API __declspec(dllexport)
+#else
+#define LYKEYSDLL_API __declspec(dllimport)
+#endif
+extern "C" LYKEYSDLL_API BOOL StopInputProcessing();
+
+
 #ifndef CTL_CODE
 #define CTL_CODE( DeviceType, Function, Method, Access ) (                 \
     ((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method) \
