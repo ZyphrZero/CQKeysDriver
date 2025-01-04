@@ -32,24 +32,16 @@ class DriverManager:
                     config = json.load(f)
                     dll_path = dll_path or config.get("dll_path")
                     sys_path = sys_path or config.get("sys_path")
-                logging.info("从配置文件加载驱动路径")
+                    logging.info("从配置文件加载驱动路径")
             except Exception as e:
                 logging.warning(f"加载配置文件失败: {str(e)}")
         
-        # 如果配置文件不存在或加载失败，使用默认路径
+        # 如果没有提供路径且配置文件不存在或加载失败，则抛出异常
         if not dll_path or not sys_path:
-            logging.info("使用默认驱动路径")
-            base_dir = os.path.dirname(os.path.dirname(__file__))
-            # lykeysdll\x64\Debug\lykeysdll.dll
-            # lykeys\x64\Debug\lykeys\lykeys.sys
-            self.dll_path = dll_path or os.path.join(base_dir, 'lykeysdll', 'x64', 'Debug', 'lykeysdll.dll')
-            self.sys_path = sys_path or os.path.join(base_dir, 'lykeys', 'x64', 'Debug', 'lykeys', 'lykeys.sys')
-        else:
-            self.dll_path = dll_path
-            self.sys_path = sys_path
-            
-        logging.info(f"DLL路径: {self.dll_path}")
-        logging.info(f"SYS路径: {self.sys_path}")
+            raise ValueError("未配置驱动路径，请在配置文件中设置或手动指定路径")
+        
+        self.dll_path = dll_path
+        self.sys_path = sys_path
         
         # 验证路径是否存在
         if not os.path.exists(self.dll_path):
@@ -136,8 +128,6 @@ class DriverManager:
             if not self.driver.LoadNTDriver(b'lykeys', self.sys_path.encode()):
                 raise RuntimeError("驱动加载失败")
             
-            # time.sleep(1)  # 等待服务启动
-            
             # 设置句柄
             self.driver.SetHandle()
             logging.info("驱动初始化完成")
@@ -159,9 +149,6 @@ class DriverManager:
         try:
             if self.driver:
                 self.driver.UnloadNTDriver(b'lykeys')
-                
-                # time.sleep(1)
-                
         except Exception as e:
             logging.warning(f"卸载驱动时出现异常(可忽略): {str(e)}")
     

@@ -155,10 +155,72 @@ class VirtualKeys:
     }
     
     @classmethod
-    def get_code(cls, key):
-        """获取虚拟键码，如果不存在返回None"""
-        if key == ' ':  # 空格字符特殊处理
+    def get_vk_code(cls, key):
+        """获取虚拟键码
+        
+        Args:
+            key: 按键名称
+            
+        Returns:
+            int: 虚拟键码，如果不存在返回None
+        """
+        if not key:
+            return None
+            
+        # 空格字符特殊处理
+        if key == ' ':
             return cls.VK_CODE['spacebar']
+            
+        key = key.upper()
+        
+        # 处理功能键 (F1-F24)
+        if key.startswith('F') and len(key) <= 3:
+            try:
+                num = int(key[1:])
+                if 1 <= num <= 24:  # 支持到F24
+                    # 直接返回对应的键码，F键在字典中就是大写的
+                    return cls.VK_CODE.get(key)
+            except ValueError:
+                pass
+        
+        # 处理字母键 (A-Z)
+        if len(key) == 1 and 'A' <= key <= 'Z':
+            return cls.VK_CODE[key.lower()]
+        
+        # 处理数字键 (0-9)
+        if len(key) == 1 and '0' <= key <= '9':
+            return cls.VK_CODE[key]
+        
+        # 处理特殊键
+        special_keys = {
+            'ENTER': 'enter',
+            'RETURN': 'enter',
+            'SPACE': 'spacebar',
+            'TAB': 'tab',
+            'SHIFT': 'shift',
+            'CTRL': 'ctrl',
+            'CONTROL': 'ctrl',
+            'ALT': 'alt',
+            'ESC': 'esc',
+            'ESCAPE': 'esc',
+            'BACKSPACE': 'backspace',
+            'DELETE': 'del',
+            'INSERT': 'ins',
+            'HOME': 'home',
+            'END': 'end',
+            'PAGEUP': 'page_up',
+            'PAGEDOWN': 'page_down',
+            'UP': 'up_arrow',
+            'DOWN': 'down_arrow',
+            'LEFT': 'left_arrow',
+            'RIGHT': 'right_arrow'
+        }
+        
+        if key in special_keys:
+            mapped_key = special_keys[key]
+            return cls.VK_CODE.get(mapped_key)
+            
+        # 如果是直接的虚拟键码映射
         return cls.VK_CODE.get(key.lower())
     
     @classmethod

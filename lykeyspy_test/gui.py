@@ -15,6 +15,11 @@ import ctypes
 from ctypes import wintypes
 import argparse
 import win32gui
+import win32api
+import win32con
+import math
+import random
+from keyboard_hook import KeyboardHook
 
 # 添加 MONITORINFO 结构体定义
 class MONITORINFO(ctypes.Structure):
@@ -42,70 +47,95 @@ SW_MAXIMIZE = 3
 
 class LYKeysGUI:
     def __init__(self):
-        # 在创建窗口前检查权限
+        """初始化GUI"""
+        # 权限检查
         if not self.check_privileges():
-            sys.exit(0)  # 干净地退出程序
+            sys.exit(0)
             
-        # 初始化基本变量
-        self.driver_mgr = None  # 驱动管理器
-        self.input_tester = None  # 输入测试器
-        self.is_driver_loaded = False  # 驱动是否已加载
-        self.is_closing = False  # 是否正在关闭程序
-        self.config_file = "driver_config.json"  # 配置文件路径
-            
-        # 创建主窗口
+        # 创建主窗口（必须最先创建）
         self.root = tk.Tk()
         self.root.title("键鼠驱动测试工具")
-        self.root.geometry("1000x800")  # 增加窗口初始大小
+        self.root.geometry("1000x1000")
         
-        # 设置全局默认字体
-        self.default_font = ('Microsoft YaHei UI', 12)  # 使用微软雅黑UI
+        # 初始化基本变量
+        # 驱动相关
+        self.driver_mgr = None
+        self.input_tester = None
+        self.is_driver_loaded = False
+        self.is_closing = False
+        self.config_file = "driver_config.json"
+        
+        # 路径配置变量（在创建根窗口后创建）
+        self.dll_path_var = tk.StringVar()
+        self.sys_path_var = tk.StringVar()
+        
+        # 测试相关变量
+        self.test_key_var = tk.StringVar(value="a")
+        self.press_time_var = tk.StringVar(value="1")
+        self.interval_time_var = tk.StringVar(value="1")
+        self.duration_var = tk.StringVar(value="0")
+        
+        # 自动移动相关变量
+        self.keyboard_hook = None
+        self.auto_move_running = False
+        self.auto_move_config = {
+            'hotkey': 'F8',
+            'speed': 10,
+            'range': 100
+        }
+        
+        # 配置界面样式
+        # 设置全局字体
+        self.default_font = ('Microsoft YaHei UI', 10)
         self.style = ttk.Style()
         self.style.configure('.', font=self.default_font)
         
-        # 配置各种ttk部件的字体
+        # 配置各种部件字体
         for widget in ['TLabel', 'TButton', 'TEntry', 'TCheckbutton', 'TRadiobutton']:
             self.style.configure(widget, font=self.default_font)
+        self.style.configure('TLabelframe.Label', font=self.default_font)
+        self.style.configure('TNotebook.Tab', font=self.default_font)
         
-        # 特别配置一些需要单独设置的部件
-        self.style.configure('TLabelframe.Label', font=self.default_font)  # LabelFrame的标题
-        self.style.configure('TNotebook.Tab', font=self.default_font)      # Notebook的标签
-        
-        # 配置根窗口的grid权重
+        # 创建主界面布局
+        # 配置根窗口网格
         self.root.grid_rowconfigure(0, weight=1)
-        self.root.grid_columnconfigure(0, weight=1)  # 整个窗口都可以扩展
+        self.root.grid_columnconfigure(0, weight=1)
         
-        # 创建PanedWindow
+        # 创建分隔窗口
         self.paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         self.paned.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         
-        # 创建左右分栏
+        # 创建左右面板
         self.left_panel = ttk.Frame(self.paned)
         self.right_panel = ttk.Frame(self.paned)
+        self.paned.add(self.left_panel, weight=2)
+        self.paned.add(self.right_panel, weight=3)
         
-        # 将左右面板添加到PanedWindow
-        self.paned.add(self.left_panel, weight=2)  # 左侧占比更大
-        self.paned.add(self.right_panel, weight=3)  # 右侧占比较小
-
-        # 创建标签页
+        # 创建标签页容器
         self.notebook = ttk.Notebook(self.left_panel)
         self.notebook.pack(fill=tk.BOTH, expand=True)
-
-        # 创建各个标签页
-        self.create_driver_tab()      # 驱动控制标签页
-        self.create_input_test_tab()  # 输入测试标签页
-        self.create_rapid_test_tab()  # 高频测试标签页
-        self.create_mouse_test_tab()  # 鼠标测试标签页
         
+        # 初始化功能组件
         # 设置日志处理器
         self._setup_logging()
         
-        # 绑定窗口关闭事件
+        # 加载配置
+        self.load_path_config()
+        self.load_auto_move_config()
+        
+        # 如果没有配置路径，显示提示消息
+        if not self.dll_path_var.get() or not self.sys_path_var.get():
+            logging.warning("请先在驱动路径配置中设置DLL和SYS文件路径")
+        
+        # 创建功能标签页
+        self.create_driver_tab()
+        self.create_input_test_tab()
+        self.create_rapid_test_tab()
+        self.create_mouse_test_tab()
+        
+        # 绑定事件
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         
-        # 加载保存的路径配置
-        self.load_path_config()
-
     def create_driver_tab(self):
         """创建驱动控制标签页"""
         driver_tab = ttk.Frame(self.notebook)
@@ -461,9 +491,70 @@ class LYKeysGUI:
                   command=lambda: self._test_mouse_wheel("down"),
                   width=15).pack(pady=2)
 
+        # 添加自动移动设置区域
+        auto_move_frame = ttk.LabelFrame(main_container, text="自动移动设置")
+        auto_move_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 热键设置
+        hotkey_frame = ttk.Frame(auto_move_frame)
+        hotkey_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(hotkey_frame, text="触发热键:").pack(side=tk.LEFT, padx=5)
+        self.hotkey_var = tk.StringVar(value=self.auto_move_config['hotkey'])
+        self.hotkey_entry = ttk.Entry(hotkey_frame, textvariable=self.hotkey_var, width=8, font=self.default_font)
+        self.hotkey_entry.pack(side=tk.LEFT, padx=5)
+        
+        # 移动速度设置
+        speed_frame = ttk.Frame(auto_move_frame)
+        speed_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(speed_frame, text="移动速度:").pack(side=tk.LEFT, padx=5)
+        self.speed_var = tk.StringVar(value=str(self.auto_move_config['speed']))
+        self.speed_entry = ttk.Entry(speed_frame, textvariable=self.speed_var, width=8, font=self.default_font)
+        self.speed_entry.pack(side=tk.LEFT, padx=5)
+        
+        # 移动范围设置
+        range_frame = ttk.Frame(auto_move_frame)
+        range_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(range_frame, text="移动范围:").pack(side=tk.LEFT, padx=5)
+        self.range_var = tk.StringVar(value=str(self.auto_move_config['range']))
+        self.range_entry = ttk.Entry(range_frame, textvariable=self.range_var, width=8, font=self.default_font)
+        self.range_entry.pack(side=tk.LEFT, padx=5)
+        
+        # 状态显示
+        status_frame = ttk.Frame(auto_move_frame)
+        status_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.auto_move_status = ttk.Label(status_frame, text="状态: 未启动")
+        self.auto_move_status.pack(side=tk.LEFT, padx=5)
+        
+        # 控制按钮
+        button_frame = ttk.Frame(auto_move_frame)
+        button_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.start_hook_btn = ttk.Button(button_frame, 
+                                       text="启动热键监听", 
+                                       command=self._toggle_keyboard_hook,
+                                       width=15)
+        self.start_hook_btn.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(button_frame, 
+                  text="保存设置", 
+                  command=self.save_auto_move_config,
+                  width=15).pack(side=tk.LEFT, padx=5)
+
     def _on_closing(self):
         """处理窗口关闭事件"""
-        self.is_closing = True  # 设置关闭标志
+        self.is_closing = True
+        
+        # 停止键盘钩子
+        if self.keyboard_hook:
+            self.keyboard_hook.stop()
+            
+        # 停止自动移动
+        self.auto_move_running = False
+        
         if self.driver_mgr:
             try:
                 self.driver_mgr.cleanup()
@@ -534,21 +625,26 @@ class LYKeysGUI:
     def _load_driver(self):
         """加载驱动"""
         try:
-            self.driver_mgr = DriverManager()
-            
             # 获取当前设置的路径
             dll_path = self.dll_path_var.get()
             sys_path = self.sys_path_var.get()
             
-            # 如果GUI中设置了路径，则使用GUI中的路径
-            if dll_path and sys_path:
+            # 检查路径是否已配置
+            if not dll_path or not sys_path:
+                messagebox.showerror("错误", "请先配置驱动路径")
+                return
+            
+            self.driver_mgr = DriverManager()
+            
+            # 使用配置的路径
+            try:
                 self.driver_mgr._setup_paths(dll_path=dll_path, sys_path=sys_path)
-            else:
-                # 否则使用默认路径或配置文件中的路径
-                self.driver_mgr._setup_paths()
-                # 更新GUI显示
-                self.dll_path_var.set(self.driver_mgr.dll_path)
-                self.sys_path_var.set(self.driver_mgr.sys_path)
+            except ValueError as ve:
+                messagebox.showerror("错误", str(ve))
+                return
+            except FileNotFoundError as fe:
+                messagebox.showerror("错误", str(fe))
+                return
             
             if self.driver_mgr.initialize():
                 self.input_tester = InputTester(self.driver_mgr.get_driver())
@@ -873,14 +969,14 @@ class LYKeysGUI:
         
         # DLL路径配置
         ttk.Label(path_frame, text="DLL路径:").grid(row=0, column=0, sticky="w")
-        self.dll_path_var = tk.StringVar()
+        # 使用已经在__init__中创建的StringVar
         self.dll_path_entry = ttk.Entry(path_frame, textvariable=self.dll_path_var, width=30, font=self.default_font)
         self.dll_path_entry.grid(row=0, column=1, padx=5)
         ttk.Button(path_frame, text="浏览", command=lambda: self.browse_file("dll")).grid(row=0, column=2)
         
         # SYS路径配置
         ttk.Label(path_frame, text="SYS路径:").grid(row=1, column=0, sticky="w")
-        self.sys_path_var = tk.StringVar()
+        # 使用已经在__init__中创建的StringVar
         self.sys_path_entry = ttk.Entry(path_frame, textvariable=self.sys_path_var, width=30, font=self.default_font)
         self.sys_path_entry.grid(row=1, column=1, padx=5)
         ttk.Button(path_frame, text="浏览", command=lambda: self.browse_file("sys")).grid(row=1, column=2)
@@ -904,10 +1000,19 @@ class LYKeysGUI:
     
     def save_path_config(self):
         """保存路径配置到文件"""
+        # 获取当前路径设置
+        dll_path = self.dll_path_var.get().strip()
+        sys_path = self.sys_path_var.get().strip()
+        
+        # 验证路径
+        if not dll_path or not sys_path:
+            logging.error("DLL路径和SYS路径不能为空")
+            return
+            
         config = {
             # 驱动路径配置
-            "dll_path": self.dll_path_var.get(),
-            "sys_path": self.sys_path_var.get(),
+            "dll_path": dll_path,
+            "sys_path": sys_path,
             
             # 高频按键测试配置
             "rapid_test": {
@@ -917,12 +1022,15 @@ class LYKeysGUI:
                 "duration": self.duration_var.get()
             }
         }
+        
         try:
             with open(self.config_file, "w") as f:
                 json.dump(config, f, indent=4)
-            messagebox.showinfo("成功", "配置保存成功！")
+            logging.info("配置保存成功")
         except Exception as e:
-            messagebox.showerror("错误", f"保存配置失败: {str(e)}")
+            error_msg = f"保存配置失败: {str(e)}"
+            logging.error(error_msg)
+            messagebox.showerror("错误", error_msg)
     
     def load_path_config(self):
         """加载保存的路径配置"""
@@ -932,20 +1040,26 @@ class LYKeysGUI:
                     config = json.load(f)
                     
                 # 加载驱动路径配置
-                self.dll_path_var.set(config.get("dll_path", ""))
-                self.sys_path_var.set(config.get("sys_path", ""))
+                dll_path = config.get("dll_path", "")
+                sys_path = config.get("sys_path", "")
+                
+                # 设置路径变量
+                if dll_path:
+                    self.dll_path_var.set(dll_path)
+                    
+                if sys_path:
+                    self.sys_path_var.set(sys_path)
                 
                 # 加载高频按键测试配置
                 rapid_test_config = config.get("rapid_test", {})
                 if rapid_test_config:
                     self.test_key_var.set(rapid_test_config.get("test_key", "a"))
-                    self.press_time_var.set(rapid_test_config.get("press_time", "10"))
-                    self.interval_time_var.set(rapid_test_config.get("interval_time", "10"))
+                    self.press_time_var.set(rapid_test_config.get("press_time", "1"))
+                    self.interval_time_var.set(rapid_test_config.get("interval_time", "1"))
                     self.duration_var.set(rapid_test_config.get("duration", "0"))
                     logging.info("已加载高频按键测试配置")
                     
         except Exception as e:
-            messagebox.showerror("错误", f"加载配置失败: {str(e)}")
             logging.error(f"加载配置失败: {str(e)}")
     
     def initialize_driver(self):
@@ -955,7 +1069,7 @@ class LYKeysGUI:
             sys_path = self.sys_path_var.get()
             
             if not dll_path or not sys_path:
-                messagebox.showerror("错误", "请先设置DLL和SYS文件路径！")
+                logging.error("请先设置DLL和SYS文件路径！")
                 return False
             
             self.driver_mgr = DriverManager()
@@ -963,7 +1077,7 @@ class LYKeysGUI:
             
             if self.driver_mgr.initialize():
                 self.input_tester = InputTester(self.driver_mgr.get_driver())
-                messagebox.showinfo("成功", "驱动初始化成功！")
+                logging.info("驱动初始化成功！")
                 return True
             else:
                 messagebox.showerror("错误", "驱动初始化失败！")
@@ -1411,6 +1525,9 @@ class LYKeysGUI:
                 step_x = dx / STEPS
                 step_y = dy / STEPS
                 
+                time.sleep(3)
+                logging.info("3秒后开始移动")
+                
                 for _ in range(STEPS):
                     self.input_tester.mouse_move_rel(int(step_x), int(step_y))
                     time.sleep(0.02)  # 20ms的延迟使移动更平滑
@@ -1476,14 +1593,193 @@ class LYKeysGUI:
         # 在新线程中运行测试
         threading.Thread(target=run_test, daemon=True).start()
 
+    def _toggle_keyboard_hook(self):
+        """切换键盘钩子状态"""
+        if not self.keyboard_hook:
+            try:
+                # 创建并启动键盘钩子
+                self.keyboard_hook = KeyboardHook()
+                
+                # 注册热键回调
+                hotkey = self.hotkey_var.get().upper()
+                vk_code = VirtualKeys.get_vk_code(hotkey)
+                if not vk_code:
+                    messagebox.showerror("错误", f"无效的热键: {hotkey}")
+                    return
+                    
+                self.keyboard_hook.register_hotkey(vk_code, self._toggle_auto_move)
+                self.keyboard_hook.start()
+                
+                # 更新UI
+                self.start_hook_btn.config(text="停止热键监听")
+                self.auto_move_status.config(text="状态: 等待热键触发")
+                
+            except Exception as e:
+                messagebox.showerror("错误", f"启动键盘钩子失败: {str(e)}")
+                self.keyboard_hook = None
+                
+        else:
+            try:
+                # 停止键盘钩子
+                self.keyboard_hook.stop()
+                self.keyboard_hook = None
+                
+                # 确保自动移动也停止
+                self.auto_move_running = False
+                
+                # 更新UI
+                self.start_hook_btn.config(text="启动热键监听")
+                self.auto_move_status.config(text="状态: 未启动")
+                
+            except Exception as e:
+                messagebox.showerror("错误", f"停止键盘钩子失败: {str(e)}")
+
+    def _toggle_auto_move(self):
+        """切换自动移动状态"""
+        if not self.is_driver_loaded or not self.input_tester:
+            messagebox.showerror("错误", "请先加载驱动")
+            return
+            
+        if not self.auto_move_running:
+            try:
+                # 获取设置
+                speed = float(self.speed_var.get())
+                move_range = float(self.range_var.get())
+                
+                if speed <= 0 or move_range <= 0:
+                    messagebox.showerror("错误", "速度和范围必须大于0")
+                    return
+                
+                # 启动自动移动
+                self.auto_move_running = True
+                self.auto_move_status.config(text="状态: 自动移动中")
+                
+                # 在新线程中运行自动移动
+                threading.Thread(target=self._run_auto_move,
+                              args=(speed, move_range),
+                              daemon=True).start()
+                
+            except ValueError:
+                messagebox.showerror("错误", "请输入有效的数值")
+                return
+                
+        else:
+            # 停止自动移动
+            self.auto_move_running = False
+            self.auto_move_status.config(text="状态: 等待热键触发")
+
+    def _run_auto_move(self, speed, move_range):
+        """运行自动移动
+        
+        Args:
+            speed: 移动速度
+            move_range: 移动范围
+        """
+        try:
+            # 获取屏幕尺寸
+            screen_width = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
+            screen_height = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
+            
+            # 获取初始鼠标位置
+            cursor_pos = win32gui.GetCursorPos()
+            center_x, center_y = cursor_pos[0], cursor_pos[1]
+            
+            # 减小移动速度和范围的影响
+            actual_speed = speed * 0.01  # 降低速度
+            actual_range = move_range * 0.5  # 减小范围
+            
+            angle = 0.0
+            last_x = center_x
+            last_y = center_y
+            
+            while self.auto_move_running:
+                try:
+                    # 计算新位置（圆形轨迹）
+                    new_x = center_x + int(actual_range * math.cos(angle))
+                    new_y = center_y + int(actual_range * math.sin(angle))
+                    
+                    # 计算相对移动距离
+                    dx = new_x - last_x
+                    dy = new_y - last_y
+                    
+                    # 确保移动距离不会太大
+                    if abs(dx) > 5 or abs(dy) > 5:
+                        dx = max(min(dx, 5), -5)
+                        dy = max(min(dy, 5), -5)
+                    
+                    # 移动鼠标（使用相对移动）
+                    if dx != 0 or dy != 0:
+                        self.input_tester.mouse_move_rel(dx, dy)
+                        last_x += dx
+                        last_y += dy
+                    
+                    # 更新角度
+                    angle += actual_speed
+                    if angle >= 2 * math.pi:
+                        angle -= 2 * math.pi
+                    
+                    # 增加延迟以减缓移动速度
+                    time.sleep(0.016)  # 约60fps的更新率
+                    
+                except Exception as e:
+                    logging.error(f"自动移动出错: {str(e)}")
+                    time.sleep(0.1)  # 出错时等待较长时间
+                    
+        except Exception as e:
+            logging.error(f"自动移动线程出错: {str(e)}")
+            self.auto_move_running = False
+            self.root.after(0, lambda: self.auto_move_status.config(text="状态: 出错"))
+
+    def save_auto_move_config(self):
+        """保存自动移动配置"""
+        try:
+            # 更新配置
+            self.auto_move_config.update({
+                'hotkey': self.hotkey_var.get(),
+                'speed': float(self.speed_var.get()),
+                'range': float(self.range_var.get())
+            })
+            
+            # 保存到文件
+            config = {
+                'dll_path': self.dll_path_var.get(),
+                'sys_path': self.sys_path_var.get(),
+                'rapid_test': {
+                    'test_key': self.test_key_var.get(),
+                    'press_time': self.press_time_var.get(),
+                    'interval_time': self.interval_time_var.get(),
+                    'duration': self.duration_var.get()
+                },
+                'auto_move': self.auto_move_config
+            }
+            
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=4)
+                
+            messagebox.showinfo("成功", "配置保存成功！")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"保存配置失败: {str(e)}")
+
+    def load_auto_move_config(self):
+        """加载自动移动配置"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                    
+                if 'auto_move' in config:
+                    self.auto_move_config.update(config['auto_move'])
+                    
+        except Exception as e:
+            logging.error(f"加载自动移动配置失败: {str(e)}")
+
 
 if __name__ == '__main__':
     try:
         app = LYKeysGUI()
         app.run()
-    except PermissionError:
-        # 权限相关的错误已经在check_privileges中处理
-        pass
+        
     except Exception as e:
         # 其他未预期的错误
         messagebox.showerror("错误", f"程序运行出错: {str(e)}") 

@@ -63,7 +63,7 @@ class InputTester:
         Returns:
             bool: 操作是否成功
         """
-        vk_code = VirtualKeys.get_code(key)
+        vk_code = VirtualKeys.get_vk_code(key)
         if vk_code is None:
             logging.error(f"无效的按键: {key}")
             return False
@@ -85,7 +85,7 @@ class InputTester:
         Returns:
             bool: 操作是否成功
         """
-        vk_code = VirtualKeys.get_code(key)
+        vk_code = VirtualKeys.get_vk_code(key)
         if vk_code is None:
             logging.error(f"无效的按键: {key}")
             return False
