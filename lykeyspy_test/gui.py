@@ -56,7 +56,7 @@ class LYKeysGUI:
         # 创建主窗口
         self.root = tk.Tk()
         self.root.title("键鼠驱动测试工具")
-        self.root.geometry("900x800")  # 增加窗口初始大小
+        self.root.geometry("1000x800")  # 增加窗口初始大小
         
         # 设置全局默认字体
         self.default_font = ('Microsoft YaHei UI', 12)  # 使用微软雅黑UI
@@ -505,8 +505,6 @@ class LYKeysGUI:
         
         # 设置文本框样式
         self.log_text.configure(font=self.default_font)  # 使用全局字体
-        # self.log_text.configure(background='#f0f0f0')   # 设置背景色
-        # self.log_text.configure(foreground='#333333')   # 设置文字颜色
         
         # 放置文本框和滚动条
         self.log_text.grid(row=0, column=0, sticky="nsew", padx=(5,0), pady=5)  # 添加内边距
@@ -557,7 +555,6 @@ class LYKeysGUI:
                 self.is_driver_loaded = True
                 self._update_button_states(True)
                 self._check_driver_status()  # 初始检查驱动状态
-                messagebox.showinfo("成功", "驱动加载成功")
             else:
                 messagebox.showerror("错误", "驱动加载失败")
         except Exception as e:
@@ -575,7 +572,6 @@ class LYKeysGUI:
                 self._update_button_states(False)
                 self.driver_status.config(text="驱动状态: 未加载")
                 self.last_check.config(text="上次检查: 未检查")
-                messagebox.showinfo("成功", "驱动卸载成功")
         except Exception as e:
             messagebox.showerror("错误", f"驱动卸载出错: {str(e)}")
     

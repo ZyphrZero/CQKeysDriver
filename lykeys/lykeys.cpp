@@ -2,6 +2,36 @@
 #include "lykeys.h"
 #include "common.h"
 
+// 反hook保护相关结构体和函数
+typedef struct _PROTECTED_REGION {
+    PVOID StartAddress;
+    SIZE_T Size;
+    ULONG OriginalChecksum;
+} PROTECTED_REGION, *PPROTECTED_REGION;
+
+typedef struct _HOOK_PROTECTION {
+    PROTECTED_REGION CodeRegion;
+    PROTECTED_REGION CallbackRegion;
+    PROTECTED_REGION DriverRegion;
+    volatile LONG IsProtectionActive;
+    KSPIN_LOCK ProtectionLock;
+    KDPC VerificationDpc;
+    KTIMER VerificationTimer;
+} HOOK_PROTECTION, *PHOOK_PROTECTION;
+
+// 全局保护对象
+static HOOK_PROTECTION g_HookProtection = {0};
+
+// 函数声明
+NTSTATUS InitializeHookProtection();
+void CleanupHookProtection();
+BOOLEAN VerifyMemoryIntegrity(PPROTECTED_REGION Region);
+VOID VerificationRoutine(PKDPC Dpc, PVOID Context, PVOID SystemArg1, PVOID SystemArg2);
+NTSTATUS ProtectCallbackFunction(PVOID CallbackAddress, SIZE_T Size);
+NTSTATUS UnprotectCallbackFunction(PVOID CallbackAddress);
+BOOLEAN IsAddressInProtectedRegion(PVOID Address);
+ULONG CalculateChecksum(PVOID Buffer, SIZE_T Size);
+
 // 前向声明
 NTSTATUS SearchServiceFromKdbExt(PDRIVER_OBJECT KbdDriverObject, PDEVICE_OBJECT pPortDev);
 NTSTATUS SearchServiceFromMouExt(PDRIVER_OBJECT MouDriverObject, PDEVICE_OBJECT pPortDev);
@@ -458,6 +488,230 @@ NTSTATUS SearchServiceFromMouExt(PDRIVER_OBJECT MouDriverObject, PDEVICE_OBJECT 
     return SearchDeviceExtension(MouDriverObject, pPortDev, DEVICE_TYPE_LY_MOUSE);
 }
 
+// 计算内存区域校验和
+ULONG CalculateChecksum(PVOID Buffer, SIZE_T Size) {
+    if (!Buffer || !Size || !MmIsAddressValid(Buffer)) {
+        return 0;
+    }
+
+    ULONG checksum = 0;
+    PUCHAR data = (PUCHAR)Buffer;
+
+    __try {
+        for (SIZE_T i = 0; i < Size; i++) {
+            if (!MmIsAddressValid(&data[i])) {
+                return 0;
+            }
+            checksum += data[i];
+            checksum = _rotl(checksum, 1);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+
+    return checksum;
+}
+
+// 验证内存区域完整性
+BOOLEAN VerifyMemoryIntegrity(PPROTECTED_REGION Region) {
+    if (!Region || !Region->StartAddress || !Region->Size) {
+        return FALSE;
+    }
+
+    ULONG currentChecksum = CalculateChecksum(Region->StartAddress, Region->Size);
+    return (currentChecksum == Region->OriginalChecksum);
+}
+
+// DPC例程用于定期验证内存完整性
+VOID VerificationRoutine(
+    PKDPC Dpc,
+    PVOID Context,
+    PVOID SystemArg1,
+    PVOID SystemArg2
+) {
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArg1);
+    UNREFERENCED_PARAMETER(SystemArg2);
+
+    PHOOK_PROTECTION protection = (PHOOK_PROTECTION)Context;
+    if (!protection) {
+        KdPrint(("Invalid protection context\n"));
+        return;
+    }
+
+    // 检查保护是否活动
+    if (InterlockedCompareExchange(&protection->IsProtectionActive, 1, 1) != 1) {
+        return;
+    }
+
+    // 获取自旋锁
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&protection->ProtectionLock, &oldIrql);
+
+    __try {
+        // 验证所有受保护区域
+        BOOLEAN codeIntegrity = TRUE;
+        BOOLEAN callbackIntegrity = TRUE;
+        BOOLEAN driverIntegrity = TRUE;
+
+        if (protection->CodeRegion.StartAddress && protection->CodeRegion.Size) {
+            codeIntegrity = VerifyMemoryIntegrity(&protection->CodeRegion);
+        }
+
+        if (protection->CallbackRegion.StartAddress && protection->CallbackRegion.Size) {
+            callbackIntegrity = VerifyMemoryIntegrity(&protection->CallbackRegion);
+        }
+
+        if (protection->DriverRegion.StartAddress && protection->DriverRegion.Size) {
+            driverIntegrity = VerifyMemoryIntegrity(&protection->DriverRegion);
+        }
+
+        // 如果检测到修改，记录日志并触发保护
+        if (!codeIntegrity || !callbackIntegrity || !driverIntegrity) {
+            KdPrint(("Memory integrity check failed: Code=%d, Callback=%d, Driver=%d\n",
+                    codeIntegrity, callbackIntegrity, driverIntegrity));
+
+            // 在实际生产环境中，您可以选择以下任一方式：
+            // 1. 触发蓝屏
+            // 2. 尝试恢复原始状态
+            // 3. 记录事件并通知用户层
+            // 这里我们选择记录事件而不是直接蓝屏
+            
+            KdPrint(("Hook detected! Memory integrity violation.\n"));
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        KdPrint(("Exception in VerificationRoutine: 0x%X\n", GetExceptionCode()));
+    }
+
+    KeReleaseSpinLock(&protection->ProtectionLock, oldIrql);
+}
+
+// 初始化hook保护
+NTSTATUS InitializeHookProtection() {
+    NTSTATUS status = STATUS_SUCCESS;
+
+    __try {
+        // 初始化自旋锁
+        KeInitializeSpinLock(&g_HookProtection.ProtectionLock);
+
+        // 初始化DPC
+        KeInitializeDpc(&g_HookProtection.VerificationDpc,
+                        VerificationRoutine,
+                        &g_HookProtection);
+
+        // 初始化定时器
+        KeInitializeTimer(&g_HookProtection.VerificationTimer);
+
+        // 设置定时器参数 (改为每5秒触发一次，减少系统负担)
+        LARGE_INTEGER dueTime;
+        dueTime.QuadPart = -50000000LL; // 5秒 = -50,000,000 * 100ns
+        
+        // 先将保护状态设置为活动
+        InterlockedExchange(&g_HookProtection.IsProtectionActive, 1);
+
+        // 启动定时器
+        if (!KeSetTimerEx(&g_HookProtection.VerificationTimer,
+                       dueTime,
+                       5000, // 周期为5秒
+                       &g_HookProtection.VerificationDpc)) {
+            KdPrint(("Failed to set timer\n"));
+            return STATUS_UNSUCCESSFUL;
+        }
+
+        KdPrint(("Hook protection initialized successfully\n"));
+        return STATUS_SUCCESS;
+
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        KdPrint(("Exception in InitializeHookProtection: 0x%X\n", GetExceptionCode()));
+        return STATUS_UNSUCCESSFUL;
+    }
+}
+
+// 清理hook保护
+void CleanupHookProtection() {
+    // 停止定时器
+    KeCancelTimer(&g_HookProtection.VerificationTimer);
+    
+    // 等待所有DPC完成
+    KeFlushQueuedDpcs();
+    
+    // 禁用保护
+    InterlockedExchange(&g_HookProtection.IsProtectionActive, 0);
+}
+
+// 保护回调函数
+NTSTATUS ProtectCallbackFunction(PVOID CallbackAddress, SIZE_T Size) {
+    if (!CallbackAddress || !Size || !MmIsAddressValid(CallbackAddress)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&g_HookProtection.ProtectionLock, &oldIrql);
+
+    g_HookProtection.CallbackRegion.StartAddress = CallbackAddress;
+    g_HookProtection.CallbackRegion.Size = Size;
+    g_HookProtection.CallbackRegion.OriginalChecksum = 
+        CalculateChecksum(CallbackAddress, Size);
+
+    KeReleaseSpinLock(&g_HookProtection.ProtectionLock, oldIrql);
+    return STATUS_SUCCESS;
+}
+
+// 取消回调函数保护
+NTSTATUS UnprotectCallbackFunction(PVOID CallbackAddress) {
+    if (!CallbackAddress) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&g_HookProtection.ProtectionLock, &oldIrql);
+
+    if (g_HookProtection.CallbackRegion.StartAddress == CallbackAddress) {
+        RtlZeroMemory(&g_HookProtection.CallbackRegion, 
+                      sizeof(PROTECTED_REGION));
+    }
+
+    KeReleaseSpinLock(&g_HookProtection.ProtectionLock, oldIrql);
+    return STATUS_SUCCESS;
+}
+
+// 检查地址是否在受保护区域内
+BOOLEAN IsAddressInProtectedRegion(PVOID Address) {
+    if (!Address) return FALSE;
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&g_HookProtection.ProtectionLock, &oldIrql);
+
+    BOOLEAN result = FALSE;
+    
+    // 检查代码区域
+    if (g_HookProtection.CodeRegion.StartAddress &&
+        Address >= g_HookProtection.CodeRegion.StartAddress &&
+        Address < (PVOID)((PUCHAR)g_HookProtection.CodeRegion.StartAddress + 
+                         g_HookProtection.CodeRegion.Size)) {
+        result = TRUE;
+    }
+    
+    // 检查回调区域
+    else if (g_HookProtection.CallbackRegion.StartAddress &&
+             Address >= g_HookProtection.CallbackRegion.StartAddress &&
+             Address < (PVOID)((PUCHAR)g_HookProtection.CallbackRegion.StartAddress + 
+                              g_HookProtection.CallbackRegion.Size)) {
+        result = TRUE;
+    }
+    
+    // 检查驱动区域
+    else if (g_HookProtection.DriverRegion.StartAddress &&
+             Address >= g_HookProtection.DriverRegion.StartAddress &&
+             Address < (PVOID)((PUCHAR)g_HookProtection.DriverRegion.StartAddress + 
+                              g_HookProtection.DriverRegion.Size)) {
+        result = TRUE;
+    }
+
+    KeReleaseSpinLock(&g_HookProtection.ProtectionLock, oldIrql);
+    return result;
+}
+
 //////////////////////////////////////////////////////////////////////////
 #ifdef __cplusplus
 extern "C"
@@ -497,13 +751,13 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
 
         // 4. 设置分发函数
         for (ULONG i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++) {
-        DriverObject->MajorFunction[i] = lykeysDefaultHandler;
+            DriverObject->MajorFunction[i] = lykeysDefaultHandler;
         }
 
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = [](PDEVICE_OBJECT, PIRP Irp) { return lykeysCreateClose(Irp); };
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = [](PDEVICE_OBJECT, PIRP Irp) { return lykeysCreateClose(Irp); };
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = lykeysDispatchDeviceControl;
-    DriverObject->DriverUnload = lykeysUnload;
+        DriverObject->MajorFunction[IRP_MJ_CREATE] = [](PDEVICE_OBJECT, PIRP Irp) { return lykeysCreateClose(Irp); };
+        DriverObject->MajorFunction[IRP_MJ_CLOSE] = [](PDEVICE_OBJECT, PIRP Irp) { return lykeysCreateClose(Irp); };
+        DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = lykeysDispatchDeviceControl;
+        DriverObject->DriverUnload = lykeysUnload;
 
         // 5. 创建设备对象
         status = IoCreateDevice(
@@ -517,12 +771,12 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
 
         if (!NT_SUCCESS(status)) {
             KdPrint(("Failed to create device: 0x%08X\n", status));
-        return status;
+            return status;
         }
 
         if (!deviceObject) {
             KdPrint(("Device object is NULL\n"));
-        return STATUS_UNEXPECTED_IO_ERROR;
+            return STATUS_UNEXPECTED_IO_ERROR;
         }
 
         // 6. 设置设备标志
@@ -538,14 +792,14 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
         symbolicLinkCreated = TRUE;
 
         // 8. 搜索键盘设备
-    status = SearchKdbServiceCallBack();
+        status = SearchKdbServiceCallBack();
         if (!NT_SUCCESS(status)) {
             KdPrint(("Failed to find keyboard device: 0x%08X\n", status));
             goto cleanup;
         }
 
         // 9. 搜索鼠标设备
-    status = SearchMouServiceCallBack();
+        status = SearchMouServiceCallBack();
         if (!NT_SUCCESS(status)) {
             KdPrint(("Failed to find mouse device: 0x%08X\n", status));
             goto cleanup;
@@ -556,10 +810,45 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
         
         if (versionInfo.MajorVersion >= 10) {
             deviceObject->Flags |= DO_POWER_PAGABLE;
-    }
+        }
     
-    if (versionInfo.Is64Bit) {
+        if (versionInfo.Is64Bit) {
             deviceObject->AlignmentRequirement = FILE_64_BYTE_ALIGNMENT;
+        }
+
+        // 11. 初始化反hook保护
+        if (NT_SUCCESS(status)) {
+            // 保护驱动对象
+            g_HookProtection.DriverRegion.StartAddress = DriverObject;
+            g_HookProtection.DriverRegion.Size = sizeof(DRIVER_OBJECT);
+            g_HookProtection.DriverRegion.OriginalChecksum = 
+                CalculateChecksum(DriverObject, sizeof(DRIVER_OBJECT));
+
+            // 保护代码段
+            PVOID codeBase = DriverObject->DriverStart;
+            SIZE_T codeSize = DriverObject->DriverSize;
+            g_HookProtection.CodeRegion.StartAddress = codeBase;
+            g_HookProtection.CodeRegion.Size = codeSize;
+            g_HookProtection.CodeRegion.OriginalChecksum = 
+                CalculateChecksum(codeBase, codeSize);
+
+            // 保护回调函数
+            if (g_KoMCallBack.KeyboardClassServiceCallback) {
+                ProtectCallbackFunction(g_KoMCallBack.KeyboardClassServiceCallback, 
+                                      PAGE_SIZE);
+            }
+            if (g_KoMCallBack.MouseClassServiceCallback) {
+                ProtectCallbackFunction(g_KoMCallBack.MouseClassServiceCallback, 
+                                      PAGE_SIZE);
+            }
+
+            // 最后启动保护机制
+            status = InitializeHookProtection();
+            if (!NT_SUCCESS(status)) {
+                KdPrint(("Warning: Failed to initialize hook protection: 0x%08X\n", status));
+                // 继续运行，不要因为保护初始化失败就退出
+                status = STATUS_SUCCESS;
+            }
         }
 
         KdPrint(("Driver initialized successfully\n"));
@@ -578,6 +867,7 @@ cleanup:
         if (deviceObject) {
             IoDeleteDevice(deviceObject);
         }
+        CleanupHookProtection();
     }
     return status;
 }
@@ -590,28 +880,39 @@ void lykeysUnload(IN PDRIVER_OBJECT DriverObject)
 
     KdPrint(("开始卸载驱动...\n"));
 
-    // 1. 删除符号链接
+    // 1. 清理反hook保护
+    CleanupHookProtection();
+
+    // 2. 删除符号链接
     RtlInitUnicodeString(&win32Device, KEYMOUSE_DOS_DEVICE_NAME);
     IoDeleteSymbolicLink(&win32Device);
 
-    // 2. 等待100ms确保没有新的IRP
+    // 3. 等待100ms确保没有新的IRP
     interval.QuadPart = -1000000; // 100ms in 100ns units
     KeDelayExecutionThread(KernelMode, FALSE, &interval);
 
     if (deviceObject != NULL) {
-        // 3. 清理设备扩展
+        // 4. 清理设备扩展
         PDEVICE_EXTENSION deviceExtension = (PDEVICE_EXTENSION)deviceObject->DeviceExtension;
         if (deviceExtension != NULL) {
+            // 取消回调函数保护
+            if (deviceExtension->My_KbdCallback) {
+                UnprotectCallbackFunction(deviceExtension->My_KbdCallback);
+            }
+            if (deviceExtension->My_MouCallback) {
+                UnprotectCallbackFunction(deviceExtension->My_MouCallback);
+            }
+
             deviceExtension->kbdDeviceObject = NULL;
             deviceExtension->mouDeviceObject = NULL;
             deviceExtension->My_KbdCallback = NULL;
             deviceExtension->My_MouCallback = NULL;
         }
 
-        // 4. 清理全局回调对象
+        // 5. 清理全局回调对象
         g_KoMCallBack.Clear();
 
-        // 5. 删除设备对象
+        // 6. 删除设备对象
         IoDeleteDevice(deviceObject);
     }
 

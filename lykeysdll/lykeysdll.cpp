@@ -355,6 +355,12 @@ extern "C" __declspec(dllexport) ULONGLONG __cdecl GetLastCheckTime()
 	return g_DriverState.lastCheckTime;
 }
 
+// 导出函数：获取驱动句柄
+extern "C" __declspec(dllexport) HANDLE __cdecl GetDriverHandle()
+{
+	return drvhandle;
+}
+
 // SetHandle函数
 BOOL SetHandle()
 {
