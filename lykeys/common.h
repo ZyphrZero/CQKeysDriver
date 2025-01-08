@@ -1,49 +1,22 @@
 // common.h
 #pragma once
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-// 避免PEPROCESS和PETHREAD重定义
-#define _PO_INCLUDED_
-#define _NTIFS_INCLUDED_
-
 #include <ntddk.h>
-#include <wdm.h>
+#include "lykeys.h"
 
-#ifdef __cplusplus
-}
-#endif
 
-// 设备名称定义
-#define KEYMOUSE_DEVICE_NAME      L"\\Device\\lykeys"
-#define KEYMOUSE_DOS_DEVICE_NAME  L"\\DosDevices\\lykeys"
-#define FILE_DEVICE_KEYMOUSE      0x8000
 
-// 设备类型定义
-#define KEYBOARD_DEVICE           0
-#define MOUSE_DEVICE             1
+//----------------------------------------------------
+// 回调函数声明
+typedef VOID(*MY_KEYBOARDCALLBACK) (PDEVICE_OBJECT  DeviceObject,
+	PKEYBOARD_INPUT_DATA  InputDataStart,
+	PKEYBOARD_INPUT_DATA  InputDataEnd,
+	PULONG  InputDataConsumed);
 
-// IOCTL 码定义
-#define IOCTL_KEYBOARD  CTL_CODE(FILE_DEVICE_KEYMOUSE, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_MOUSE     CTL_CODE(FILE_DEVICE_KEYMOUSE, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+typedef VOID(*MY_MOUSECALLBACK) (PDEVICE_OBJECT  DeviceObject,
+	PMOUSE_INPUT_DATA  InputDataStart,
+	PMOUSE_INPUT_DATA  InputDataEnd,
+	PULONG  InputDataConsumed);
 
-// 内存保护相关定义
-#ifndef PAGE_READONLY
-#define PAGE_READONLY          0x02
-#endif
-
-#ifndef PAGE_READWRITE
-#define PAGE_READWRITE        0x04
-#endif
-
-// 回调函数类型定义
-typedef VOID (*MY_KEYBOARDCALLBACK)(PDEVICE_OBJECT DeviceObject, PKEYBOARD_INPUT_DATA InputDataStart,
-	PKEYBOARD_INPUT_DATA InputDataEnd, PULONG InputDataConsumed);
-
-typedef VOID (*MY_MOUSECALLBACK)(PDEVICE_OBJECT DeviceObject, PMOUSE_INPUT_DATA InputDataStart,
-	PMOUSE_INPUT_DATA InputDataEnd, PULONG InputDataConsumed);
 
 typedef enum _SYSTEM_INFORMATION_CLASS {
 	SystemBasicInformation = 0,
@@ -102,7 +75,10 @@ typedef enum _SYSTEM_INFORMATION_CLASS {
 	SystemInformationClassMax
 } SYSTEM_INFORMATION_CLASS, * PSYSTEM_INFORMATION_CLASS;
 
+
+
 typedef struct _SYSTEM_MODULE_INFORMATION {//Information Class 11
+
 	ULONG     Reserved[2];
 	PVOID     Base;
 	ULONG     Size;
@@ -112,32 +88,46 @@ typedef struct _SYSTEM_MODULE_INFORMATION {//Information Class 11
 	USHORT    LoadCount;
 	USHORT    ModuleNameOffset;
 	CHAR      ImageName[256];
+
 }SYSTEM_MODULE_INFORMATION, * PSYSTEM_MODULE_INFORMATION;
 
+
 typedef struct _SYSMODULE_LIST {
+
 	ULONG                        dwNumberOfModules;
 	SYSTEM_MODULE_INFORMATION    SysModuleInfo[1];
+
 } SYSMODULE_LIST, * PSYSMODULE_LIST;
 
+
 typedef struct _SYSTEM_SERVICE_TABLE {
+
 	PULONG ServiceTableBase;                //这个指向系统服务函数地址表
 	PULONG ServiceCounterTableBase;
 	ULONG NumberOfService;                  //服务函数的个数
 	ULONG ParamTableBase;
+
 }SYSTEM_SERVICE_TABLE, * PSYSTEM_SERVICE_TABLE;
 
+
 typedef struct _SERVICE_DESCRIPTOR_TABLE {
+
 	SYSTEM_SERVICE_TABLE ntoskrnel;         //ntoskrnl.exe的服务函数
 	SYSTEM_SERVICE_TABLE win32k;            //win32k.sys的服务函数,(gdi.dll/user.dll的内核支持)
 	SYSTEM_SERVICE_TABLE NotUsed1;
 	SYSTEM_SERVICE_TABLE NotUsed2;
+
 }SYSTEM_DESCRIPTOR_TABLE, * PSYSTEM_DESCRIPTOR_TABLE;
 
+
+
 // 声明为导出变量
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
+
 
 	NTSTATUS
 		ObReferenceObjectByName(
@@ -151,8 +141,10 @@ extern "C"
 			OUT PVOID* Object
 			);
 
+
 	extern POBJECT_TYPE* IoDriverObjectType;
 	extern PSYSTEM_DESCRIPTOR_TABLE KeServiceDescriptorTable;
+
 
 #ifdef __cplusplus
 }

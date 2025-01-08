@@ -2,158 +2,6 @@
 #include "lykeys.h"
 #include "common.h"
 
-// 避免PEPROCESS和PETHREAD重定义
-#define _PO_INCLUDED_
-#define _NTIFS_INCLUDED_
-
-#include <ntifs.h>
-
-// 按键缓冲队列大小
-#define MAX_INPUT_QUEUE_SIZE 1024
-
-// 前向声明DPC处理例程
-VOID ProcessInputDpcRoutine(
-    IN PKDPC Dpc,
-    IN PVOID DeferredContext,
-    IN PVOID SystemArgument1,
-    IN PVOID SystemArgument2
-);
-
-// 回调结构
-struct LY_CALLBACK {
-    PDEVICE_OBJECT KdbDeviceObject;
-    MY_KEYBOARDCALLBACK KeyboardClassServiceCallback;
-    PDEVICE_OBJECT MouDeviceObject;
-    MY_MOUSECALLBACK MouseClassServiceCallback;
-    
-    // 内联检查函数
-    __forceinline bool HasKeyboardCallback() const {
-        return KdbDeviceObject && KeyboardClassServiceCallback;
-    }
-    
-    __forceinline bool HasMouseCallback() const {
-        return MouDeviceObject && MouseClassServiceCallback;
-    }
-    
-    // 内联清理函数
-    __forceinline void Clear() {
-        KdbDeviceObject = nullptr;
-        KeyboardClassServiceCallback = nullptr;
-        MouDeviceObject = nullptr;
-        MouseClassServiceCallback = nullptr;
-    }
-} g_KoMCallBack;
-
-// 按键缓冲队列结构
-typedef struct _INPUT_QUEUE {
-    KSPIN_LOCK QueueLock;
-    volatile LONG QueueCount;
-    KEYBOARD_INPUT_DATA KeyboardBuffer[MAX_INPUT_QUEUE_SIZE];
-    MOUSE_INPUT_DATA MouseBuffer[MAX_INPUT_QUEUE_SIZE];
-    volatile ULONG ReadIndex;
-    volatile ULONG WriteIndex;
-    KEVENT DataAvailableEvent;
-    KEVENT SpaceAvailableEvent;
-    KDPC ProcessingDpc;
-    KTIMER ProcessingTimer;
-    volatile BOOLEAN IsProcessing;
-} INPUT_QUEUE, *PINPUT_QUEUE;
-
-static INPUT_QUEUE g_InputQueue = {0};
-
-// 初始化输入队列
-NTSTATUS InitializeInputQueue() {
-    KeInitializeSpinLock(&g_InputQueue.QueueLock);
-    KeInitializeEvent(&g_InputQueue.DataAvailableEvent, SynchronizationEvent, FALSE);
-    KeInitializeEvent(&g_InputQueue.SpaceAvailableEvent, SynchronizationEvent, TRUE);
-    
-    g_InputQueue.ReadIndex = 0;
-    g_InputQueue.WriteIndex = 0;
-    g_InputQueue.QueueCount = 0;
-    g_InputQueue.IsProcessing = FALSE;
-
-    // 初始化DPC和定时器
-    KeInitializeDpc(&g_InputQueue.ProcessingDpc, 
-                    ProcessInputDpcRoutine,
-                    NULL);
-    
-    KeInitializeTimer(&g_InputQueue.ProcessingTimer);
-
-    return STATUS_SUCCESS;
-}
-
-// DPC处理例程
-VOID ProcessInputDpcRoutine(
-    IN PKDPC Dpc,
-    IN PVOID DeferredContext,
-    IN PVOID SystemArgument1,
-    IN PVOID SystemArgument2
-) {
-    UNREFERENCED_PARAMETER(Dpc);
-    UNREFERENCED_PARAMETER(DeferredContext);
-    UNREFERENCED_PARAMETER(SystemArgument1);
-    UNREFERENCED_PARAMETER(SystemArgument2);
-
-    KIRQL oldIrql;
-    KEYBOARD_INPUT_DATA kidBuffer[16];
-    MOUSE_INPUT_DATA midBuffer[16];
-    ULONG processedCount = 0;
-
-    while (g_InputQueue.QueueCount > 0) {
-        KeAcquireSpinLock(&g_InputQueue.QueueLock, &oldIrql);
-
-        // 批量处理按键，最多一次处理16个
-        ULONG batchSize = min(16, g_InputQueue.QueueCount);
-        for (ULONG i = 0; i < batchSize; i++) {
-            if (g_KoMCallBack.HasKeyboardCallback()) {
-                kidBuffer[processedCount] = g_InputQueue.KeyboardBuffer[g_InputQueue.ReadIndex];
-                processedCount++;
-            }
-            
-            g_InputQueue.ReadIndex = (g_InputQueue.ReadIndex + 1) % MAX_INPUT_QUEUE_SIZE;
-            InterlockedDecrement(&g_InputQueue.QueueCount);
-        }
-
-        KeReleaseSpinLock(&g_InputQueue.QueueLock, oldIrql);
-
-        // 批量发送按键
-        if (processedCount > 0 && g_KoMCallBack.HasKeyboardCallback()) {
-            ULONG inputDataConsumed;
-            g_KoMCallBack.KeyboardClassServiceCallback(
-                g_KoMCallBack.KdbDeviceObject,
-                kidBuffer,
-                &kidBuffer[processedCount],
-                &inputDataConsumed);
-        }
-
-        // 设置事件，通知有空间可用
-        if (g_InputQueue.QueueCount < MAX_INPUT_QUEUE_SIZE / 2) {
-            KeSetEvent(&g_InputQueue.SpaceAvailableEvent, IO_NO_INCREMENT, FALSE);
-        }
-
-        // 避免长时间占用处理器
-        if (processedCount >= 64) {
-            break;
-        }
-    }
-
-    // 如果队列还有数据，重新调度DPC
-    if (g_InputQueue.QueueCount > 0) {
-        LARGE_INTEGER dueTime;
-        dueTime.QuadPart = -10000; // 1ms后重新处理
-        KeSetTimer(&g_InputQueue.ProcessingTimer, dueTime, &g_InputQueue.ProcessingDpc);
-    } else {
-        g_InputQueue.IsProcessing = FALSE;
-    }
-}
-
-// 前向声明ValidateMemoryAccess
-NTSTATUS ValidateMemoryAccess(
-    IN PVOID Address,
-    IN SIZE_T Size,
-    IN ULONG RequiredAccess
-);
-
 // 反hook保护相关结构体和函数
 typedef struct _PROTECTED_REGION {
     PVOID StartAddress;
@@ -173,34 +21,6 @@ typedef struct _HOOK_PROTECTION {
 
 // 全局保护对象
 static HOOK_PROTECTION g_HookProtection = {0};
-
-// 内存保护状态结构
-typedef struct _MEMORY_PROTECTION_STATE {
-    volatile LONG IsMemoryLocked;
-    PVOID LockedRegionStart;
-    SIZE_T LockedRegionSize;
-    PMDL MemoryMdl;
-} MEMORY_PROTECTION_STATE, *PMEMORY_PROTECTION_STATE;
-
-static MEMORY_PROTECTION_STATE g_MemoryProtection = { 0 };
-
-// 安全状态检查结构
-typedef struct _DRIVER_SAFETY_CHECK {
-    volatile LONG IsDriverLoaded;
-    volatile LONG PendingOperations;
-    KSPIN_LOCK SafetyLock;
-    KEVENT ShutdownEvent;
-} DRIVER_SAFETY_CHECK, *PDRIVER_SAFETY_CHECK;
-
-static DRIVER_SAFETY_CHECK g_SafetyCheck = { 0 };
-
-// 内存访问验证结构
-typedef struct _MEMORY_ACCESS_VALIDATION {
-    PVOID ValidatedRegion;
-    SIZE_T RegionSize;
-    ULONG AccessFlags;
-    MEMORY_CACHING_TYPE CacheType;
-} MEMORY_ACCESS_VALIDATION, *PMEMORY_ACCESS_VALIDATION;
 
 // 函数声明
 NTSTATUS InitializeHookProtection();
@@ -254,6 +74,106 @@ typedef struct _DEVICE_EXTENSION {
     MY_KEYBOARDCALLBACK My_KbdCallback;   
     MY_MOUSECALLBACK My_MouCallback;     
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION;
+
+// 回调结构
+struct LY_CALLBACK {
+    PDEVICE_OBJECT KdbDeviceObject;
+    MY_KEYBOARDCALLBACK KeyboardClassServiceCallback;
+    PDEVICE_OBJECT MouDeviceObject;
+    MY_MOUSECALLBACK MouseClassServiceCallback;
+    
+    // 内联检查函数
+    __forceinline bool HasKeyboardCallback() const {
+        return KdbDeviceObject && KeyboardClassServiceCallback;
+    }
+    
+    __forceinline bool HasMouseCallback() const {
+        return MouDeviceObject && MouseClassServiceCallback;
+    }
+    
+    // 内联清理函数
+    __forceinline void Clear() {
+        KdbDeviceObject = nullptr;
+        KeyboardClassServiceCallback = nullptr;
+        MouDeviceObject = nullptr;
+        MouseClassServiceCallback = nullptr;
+    }
+} g_KoMCallBack;
+
+// 内联处理函数
+__forceinline NTSTATUS lykeysCreateClose(IN PIRP Irp)
+{
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+__forceinline NTSTATUS lykeysDefaultHandler(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp)
+{
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Irp->IoStatus.Status;
+}
+
+// 优化设备控制函数
+NTSTATUS lykeysDispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp)
+{
+    const PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+    const PDEVICE_EXTENSION deviceExtension = static_cast<PDEVICE_EXTENSION>(DeviceObject->DeviceExtension);
+    const PVOID ioBuffer = Irp->AssociatedIrp.SystemBuffer;
+    const ULONG ioControlCode = irpStack->Parameters.DeviceIoControl.IoControlCode;
+    NTSTATUS status = STATUS_SUCCESS;
+    
+    Irp->IoStatus.Information = 0;
+
+    __try {
+        switch (ioControlCode)
+        {
+        case IOCTL_KEYBOARD:
+            if (ioBuffer && g_KoMCallBack.HasKeyboardCallback())
+            {
+                // 创建非const副本以匹配回调函数签名
+                KEYBOARD_INPUT_DATA kid = *static_cast<PKEYBOARD_INPUT_DATA>(ioBuffer);
+                ULONG inputDataConsumed;
+                g_KoMCallBack.KeyboardClassServiceCallback(
+                    g_KoMCallBack.KdbDeviceObject,
+                    &kid,
+                    &kid + 1,
+                    &inputDataConsumed);
+            }
+            break;
+
+        case IOCTL_MOUSE:
+            if (ioBuffer && g_KoMCallBack.HasMouseCallback())
+            {
+                // 创建非const副本以匹配回调函数签名
+                MOUSE_INPUT_DATA mid = *static_cast<PMOUSE_INPUT_DATA>(ioBuffer);
+                ULONG inputDataConsumed;
+                g_KoMCallBack.MouseClassServiceCallback(
+                    g_KoMCallBack.MouDeviceObject,
+                    &mid,
+                    &mid + 1,
+                    &inputDataConsumed);
+            }
+            break;
+
+        default:
+            status = STATUS_INVALID_PARAMETER;
+            KdPrint(("Unknown IRP_MJ_DEVICE_CONTROL\n"));
+            break;
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+        KdPrint(("Exception in lykeysDispatchDeviceControl: 0x%X\n", status));
+    }
+
+    Irp->IoStatus.Status = status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+}
 
 // 设备类型枚举
 typedef enum _DEVICE_TYPE_LY {  // 重命名以避免与Windows定义冲突
@@ -598,37 +518,8 @@ BOOLEAN VerifyMemoryIntegrity(PPROTECTED_REGION Region) {
         return FALSE;
     }
 
-    __try {
-        // 验证内存访问权限
-        NTSTATUS status = ValidateMemoryAccess(
-            Region->StartAddress,
-            Region->Size,
-            PAGE_READONLY
-        );
-
-        if (!NT_SUCCESS(status)) {
-            KdPrint(("Memory access validation failed: 0x%X\n", status));
-            return FALSE;
-        }
-
-        // 计算当前校验和
-        ULONG currentChecksum = CalculateChecksum(
-            Region->StartAddress,
-            Region->Size
-        );
-
-        // 比较校验和
-        if (currentChecksum != Region->OriginalChecksum) {
-            KdPrint(("Checksum mismatch: Original=0x%X, Current=0x%X\n",
-                Region->OriginalChecksum, currentChecksum));
-            return FALSE;
-        }
-
-        return TRUE;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        KdPrint(("Exception in VerifyMemoryIntegrity: 0x%X\n", GetExceptionCode()));
-        return FALSE;
-    }
+    ULONG currentChecksum = CalculateChecksum(Region->StartAddress, Region->Size);
+    return (currentChecksum == Region->OriginalChecksum);
 }
 
 // DPC例程用于定期验证内存完整性
@@ -643,35 +534,50 @@ VOID VerificationRoutine(
     UNREFERENCED_PARAMETER(SystemArg2);
 
     PHOOK_PROTECTION protection = (PHOOK_PROTECTION)Context;
-    if (!protection) return;
+    if (!protection) {
+        KdPrint(("Invalid protection context\n"));
+        return;
+    }
 
     // 检查保护是否活动
     if (InterlockedCompareExchange(&protection->IsProtectionActive, 1, 1) != 1) {
         return;
     }
 
+    // 获取自旋锁
     KIRQL oldIrql;
     KeAcquireSpinLock(&protection->ProtectionLock, &oldIrql);
 
     __try {
-        // 验证回调函数内存完整性
-        if (protection->CallbackRegion.StartAddress &&
-            protection->CallbackRegion.Size) {
-            
-            if (!VerifyMemoryIntegrity(&protection->CallbackRegion)) {
-                KdPrint(("Callback memory integrity check failed!\n"));
-                // 在这里可以采取相应的保护措施，如恢复原始代码等
-            }
+        // 验证所有受保护区域
+        BOOLEAN codeIntegrity = TRUE;
+        BOOLEAN callbackIntegrity = TRUE;
+        BOOLEAN driverIntegrity = TRUE;
+
+        if (protection->CodeRegion.StartAddress && protection->CodeRegion.Size) {
+            codeIntegrity = VerifyMemoryIntegrity(&protection->CodeRegion);
         }
 
-        // 验证驱动代码段完整性
-        if (protection->DriverRegion.StartAddress &&
-            protection->DriverRegion.Size) {
+        if (protection->CallbackRegion.StartAddress && protection->CallbackRegion.Size) {
+            callbackIntegrity = VerifyMemoryIntegrity(&protection->CallbackRegion);
+        }
+
+        if (protection->DriverRegion.StartAddress && protection->DriverRegion.Size) {
+            driverIntegrity = VerifyMemoryIntegrity(&protection->DriverRegion);
+        }
+
+        // 如果检测到修改，记录日志并触发保护
+        if (!codeIntegrity || !callbackIntegrity || !driverIntegrity) {
+            KdPrint(("Memory integrity check failed: Code=%d, Callback=%d, Driver=%d\n",
+                    codeIntegrity, callbackIntegrity, driverIntegrity));
+
+            // 在实际生产环境中，您可以选择以下任一方式：
+            // 1. 触发蓝屏
+            // 2. 尝试恢复原始状态
+            // 3. 记录事件并通知用户层
+            // 这里我们选择记录事件而不是直接蓝屏
             
-            if (!VerifyMemoryIntegrity(&protection->DriverRegion)) {
-                KdPrint(("Driver code integrity check failed!\n"));
-                // 可以在这里添加额外的保护措施
-            }
+            KdPrint(("Hook detected! Memory integrity violation.\n"));
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         KdPrint(("Exception in VerificationRoutine: 0x%X\n", GetExceptionCode()));
@@ -733,61 +639,7 @@ void CleanupHookProtection() {
     InterlockedExchange(&g_HookProtection.IsProtectionActive, 0);
 }
 
-// 锁定内存区域防止修改
-NTSTATUS LockMemoryRegion(PVOID Address, SIZE_T Size) {
-    if (!Address || !Size || !MmIsAddressValid(Address)) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    __try {
-        // 已经锁定则返回
-        if (InterlockedCompareExchange(&g_MemoryProtection.IsMemoryLocked, 1, 0) == 1) {
-            return STATUS_ALREADY_COMMITTED;
-        }
-
-        // 创建MDL
-        PMDL mdl = IoAllocateMdl(Address, (ULONG)Size, FALSE, FALSE, NULL);
-        if (!mdl) {
-            InterlockedExchange(&g_MemoryProtection.IsMemoryLocked, 0);
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        // 锁定页面
-        __try {
-            MmProbeAndLockPages(mdl, KernelMode, IoReadAccess);
-        } __except(EXCEPTION_EXECUTE_HANDLER) {
-            IoFreeMdl(mdl);
-            InterlockedExchange(&g_MemoryProtection.IsMemoryLocked, 0);
-            return STATUS_UNSUCCESSFUL;
-        }
-
-        g_MemoryProtection.MemoryMdl = mdl;
-        g_MemoryProtection.LockedRegionStart = Address;
-        g_MemoryProtection.LockedRegionSize = Size;
-
-        return STATUS_SUCCESS;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        return STATUS_UNSUCCESSFUL;
-    }
-}
-
-// 解锁内存区域
-VOID UnlockMemoryRegion() {
-    if (InterlockedCompareExchange(&g_MemoryProtection.IsMemoryLocked, 0, 1) == 0) {
-        return;
-    }
-
-    if (g_MemoryProtection.MemoryMdl) {
-        MmUnlockPages(g_MemoryProtection.MemoryMdl);
-        IoFreeMdl(g_MemoryProtection.MemoryMdl);
-        g_MemoryProtection.MemoryMdl = NULL;
-    }
-
-    g_MemoryProtection.LockedRegionStart = NULL;
-    g_MemoryProtection.LockedRegionSize = 0;
-}
-
-// 增强的ProtectCallbackFunction
+// 保护回调函数
 NTSTATUS ProtectCallbackFunction(PVOID CallbackAddress, SIZE_T Size) {
     if (!CallbackAddress || !Size || !MmIsAddressValid(CallbackAddress)) {
         return STATUS_INVALID_PARAMETER;
@@ -796,30 +648,16 @@ NTSTATUS ProtectCallbackFunction(PVOID CallbackAddress, SIZE_T Size) {
     KIRQL oldIrql;
     KeAcquireSpinLock(&g_HookProtection.ProtectionLock, &oldIrql);
 
-    __try {
-        // 锁定内存
-        NTSTATUS status = LockMemoryRegion(CallbackAddress, Size);
-        if (!NT_SUCCESS(status)) {
-            KeReleaseSpinLock(&g_HookProtection.ProtectionLock, oldIrql);
-            return status;
-        }
-
-        g_HookProtection.CallbackRegion.StartAddress = CallbackAddress;
-        g_HookProtection.CallbackRegion.Size = Size;
-        g_HookProtection.CallbackRegion.OriginalChecksum = 
-            CalculateChecksum(CallbackAddress, Size);
-
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        UnlockMemoryRegion();
-        KeReleaseSpinLock(&g_HookProtection.ProtectionLock, oldIrql);
-        return STATUS_UNSUCCESSFUL;
-    }
+    g_HookProtection.CallbackRegion.StartAddress = CallbackAddress;
+    g_HookProtection.CallbackRegion.Size = Size;
+    g_HookProtection.CallbackRegion.OriginalChecksum = 
+        CalculateChecksum(CallbackAddress, Size);
 
     KeReleaseSpinLock(&g_HookProtection.ProtectionLock, oldIrql);
     return STATUS_SUCCESS;
 }
 
-// 增强的UnprotectCallbackFunction
+// 取消回调函数保护
 NTSTATUS UnprotectCallbackFunction(PVOID CallbackAddress) {
     if (!CallbackAddress) {
         return STATUS_INVALID_PARAMETER;
@@ -829,8 +667,8 @@ NTSTATUS UnprotectCallbackFunction(PVOID CallbackAddress) {
     KeAcquireSpinLock(&g_HookProtection.ProtectionLock, &oldIrql);
 
     if (g_HookProtection.CallbackRegion.StartAddress == CallbackAddress) {
-        UnlockMemoryRegion();
-        RtlZeroMemory(&g_HookProtection.CallbackRegion, sizeof(PROTECTED_REGION));
+        RtlZeroMemory(&g_HookProtection.CallbackRegion, 
+                      sizeof(PROTECTED_REGION));
     }
 
     KeReleaseSpinLock(&g_HookProtection.ProtectionLock, oldIrql);
@@ -874,174 +712,6 @@ BOOLEAN IsAddressInProtectedRegion(PVOID Address) {
     return result;
 }
 
-// 安全的驱动初始化
-NTSTATUS InitializeDriverSafety() {
-    KeInitializeSpinLock(&g_SafetyCheck.SafetyLock);
-    KeInitializeEvent(&g_SafetyCheck.ShutdownEvent, NotificationEvent, FALSE);
-    InterlockedExchange(&g_SafetyCheck.IsDriverLoaded, 1);
-    InterlockedExchange(&g_SafetyCheck.PendingOperations, 0);
-    return STATUS_SUCCESS;
-}
-
-// 安全的驱动清理
-VOID CleanupDriverSafety() {
-    // 设置关闭标志
-    InterlockedExchange(&g_SafetyCheck.IsDriverLoaded, 0);
-    
-    // 等待所有挂起的操作完成
-    LARGE_INTEGER timeout;
-    timeout.QuadPart = -10000000; // 1秒
-    while (InterlockedCompareExchange(&g_SafetyCheck.PendingOperations, 0, 0) > 0) {
-        KeWaitForSingleObject(&g_SafetyCheck.ShutdownEvent, 
-                             Executive, 
-                             KernelMode, 
-                             FALSE, 
-                             &timeout);
-    }
-}
-
-// 验证内存访问权限
-NTSTATUS ValidateMemoryAccess(PVOID Address, SIZE_T Size, ULONG RequiredAccess) {
-    if (!Address || !Size) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    __try {
-        // 验证地址有效性
-        if (!MmIsAddressValid(Address)) {
-            return STATUS_INVALID_ADDRESS;
-        }
-
-        // 获取内存区域信息
-        MEMORY_BASIC_INFORMATION memInfo = {0};
-        SIZE_T returnLength = 0;
-        NTSTATUS status = ZwQueryVirtualMemory(
-            NtCurrentProcess(),
-            Address,
-            MemoryBasicInformation,
-            &memInfo,
-            sizeof(memInfo),
-            &returnLength
-        );
-
-        if (!NT_SUCCESS(status)) {
-            return status;
-        }
-
-        // 验证内存保护属性
-        if ((memInfo.Protect & RequiredAccess) != RequiredAccess) {
-            return STATUS_ACCESS_DENIED;
-        }
-
-        // 验证内存区域大小
-        if (Size > memInfo.RegionSize - ((ULONG_PTR)Address - (ULONG_PTR)memInfo.BaseAddress)) {
-            return STATUS_INVALID_BUFFER_SIZE;
-        }
-
-        return STATUS_SUCCESS;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        return STATUS_ACCESS_VIOLATION;
-    }
-}
-
-// 内联处理函数
-__forceinline NTSTATUS lykeysCreateClose(IN PIRP Irp)
-{
-    Irp->IoStatus.Status = STATUS_SUCCESS;
-    Irp->IoStatus.Information = 0;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    return STATUS_SUCCESS;
-}
-
-__forceinline NTSTATUS lykeysDefaultHandler(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp)
-{
-    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
-    Irp->IoStatus.Information = 0;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    return Irp->IoStatus.Status;
-}
-
-// 修改分发函数
-NTSTATUS lykeysDispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
-    const PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
-    const PDEVICE_EXTENSION deviceExtension = static_cast<PDEVICE_EXTENSION>(DeviceObject->DeviceExtension);
-    const PVOID ioBuffer = Irp->AssociatedIrp.SystemBuffer;
-    const ULONG ioControlCode = irpStack->Parameters.DeviceIoControl.IoControlCode;
-    NTSTATUS status = STATUS_SUCCESS;
-    
-    Irp->IoStatus.Information = 0;
-
-    __try {
-        switch (ioControlCode) {
-            case IOCTL_KEYBOARD: {
-                if (ioBuffer && g_KoMCallBack.HasKeyboardCallback()) {
-                    KIRQL oldIrql;
-                    KeAcquireSpinLock(&g_InputQueue.QueueLock, &oldIrql);
-
-                    // 检查队列是否已满
-                    if (g_InputQueue.QueueCount >= MAX_INPUT_QUEUE_SIZE) {
-                        // 等待队列有空间
-                        KeReleaseSpinLock(&g_InputQueue.QueueLock, oldIrql);
-                        status = KeWaitForSingleObject(
-                            &g_InputQueue.SpaceAvailableEvent,
-                            Executive,
-                            KernelMode,
-                            FALSE,
-                            NULL);
-                        
-                        if (!NT_SUCCESS(status)) {
-                            break;
-                        }
-                        
-                        KeAcquireSpinLock(&g_InputQueue.QueueLock, &oldIrql);
-                    }
-
-                    // 添加到队列
-                    g_InputQueue.KeyboardBuffer[g_InputQueue.WriteIndex] = 
-                        *static_cast<PKEYBOARD_INPUT_DATA>(ioBuffer);
-                    g_InputQueue.WriteIndex = (g_InputQueue.WriteIndex + 1) % MAX_INPUT_QUEUE_SIZE;
-                    InterlockedIncrement(&g_InputQueue.QueueCount);
-
-                    // 如果没有正在处理，启动处理
-                    if (!g_InputQueue.IsProcessing) {
-                        g_InputQueue.IsProcessing = TRUE;
-                        KeInsertQueueDpc(&g_InputQueue.ProcessingDpc, NULL, NULL);
-                    }
-
-                    KeReleaseSpinLock(&g_InputQueue.QueueLock, oldIrql);
-                }
-                break;
-            }
-
-            case IOCTL_MOUSE: {
-                if (ioBuffer && g_KoMCallBack.HasMouseCallback()) {
-                    // 鼠标事件直接处理，因为通常不会出现高频问题
-                    ULONG inputDataConsumed;
-                    MOUSE_INPUT_DATA mid = *static_cast<PMOUSE_INPUT_DATA>(ioBuffer);
-                    g_KoMCallBack.MouseClassServiceCallback(
-                        g_KoMCallBack.MouDeviceObject,
-                        &mid,
-                        &mid + 1,
-                        &inputDataConsumed);
-                }
-                break;
-            }
-
-            default:
-                status = STATUS_INVALID_PARAMETER;
-                KdPrint(("Unknown IRP_MJ_DEVICE_CONTROL\n"));
-                break;
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        status = GetExceptionCode();
-        KdPrint(("Exception in lykeysDispatchDeviceControl: 0x%X\n", status));
-    }
-
-    Irp->IoStatus.Status = status;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    return status;
-}
-
 //////////////////////////////////////////////////////////////////////////
 #ifdef __cplusplus
 extern "C"
@@ -1052,12 +722,6 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
     PDEVICE_OBJECT deviceObject = NULL;
     NTSTATUS status;
     BOOLEAN symbolicLinkCreated = FALSE;
-    
-    // 初始化安全检查
-    status = InitializeDriverSafety();
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
     
     // 1. 获取系统版本信息
     SYSTEM_VERSION_INFO versionInfo;
@@ -1152,13 +816,6 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
             deviceObject->AlignmentRequirement = FILE_64_BYTE_ALIGNMENT;
         }
 
-        // 初始化输入队列
-        status = InitializeInputQueue();
-        if (!NT_SUCCESS(status)) {
-            KdPrint(("Failed to initialize input queue: 0x%08X\n", status));
-            goto cleanup;
-        }
-
         // 11. 初始化反hook保护
         if (NT_SUCCESS(status)) {
             // 保护驱动对象
@@ -1223,13 +880,7 @@ void lykeysUnload(IN PDRIVER_OBJECT DriverObject)
 
     KdPrint(("开始卸载驱动...\n"));
 
-    // 清理安全检查
-    CleanupDriverSafety();
-    
-    // 确保内存解锁
-    UnlockMemoryRegion();
-    
-    // 清理hook保护
+    // 1. 清理反hook保护
     CleanupHookProtection();
 
     // 2. 删除符号链接
