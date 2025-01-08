@@ -65,3 +65,109 @@
 - 所有接口都是线程安全的
 - 多线程环境下无需额外同步措施
 - 建议在主线程中进行驱动加载和卸载操作
+
+
+## 调试&蓝屏分析
+
+### WinDbg  
+1. 配置系统生成完整转储：
+```
+1. 右键"此电脑" -> 属性
+2. 高级系统设置 -> 高级 -> 启动和故障恢复 -> 设置
+3. 在"写入调试信息"下选择"完整内存转储"
+4. 确保"自动重新启动"已勾选
+```
+2. 安装调试工具：
+```
+1. 下载并安装 WDK (Windows Driver Kit)
+2. 安装 Windows SDK
+3. 安装 WinDbg (Windows Debugger)
+```
+
+3. 使用 WinDbg 分析：
+```
+// 使用powershell管理员方式执行以下命令安装 WinDbg
+winget install Microsoft.WinDbg
+
+1. 打开 WinDbg
+2. File -> Open Crash Dump
+3. 选择 C:\Windows\MEMORY.DMP 或 Minidump 文件
+```
+4. 在命令窗口输入：
+```
+   !analyze -v    # 详细分析崩溃原因
+   .bugcheck      # 显示蓝屏代码
+   kb             # 显示调用栈
+   lmvm lykeys    # 显示我们的驱动信息
+```
+
+### 2. BlueScreenView
+1. 使用 BlueScreenView（更简单的方法）：
+```
+1. 下载并安装 BlueScreenView
+2. 运行后自动显示所有蓝屏记录
+3. 查看：
+   - 蓝屏代码
+   - 发生时间
+   - 导致崩溃的驱动
+   - 调用栈信息
+```
+2. 在驱动代码中添加详细日志
+```
+KdPrint(("Driver State: %d, IRQL: %d\n", state, KeGetCurrentIrql()));
+KdPrint(("Callback Address: 0x%p\n", callback));
+KdPrint(("Memory Region: 0x%p, Size: %d\n", address, size));
+```
+
+3. 配置本地内核调试：
+```
+bcdedit /debug on
+bcdedit /dbgsettings local
+bcdedit /set TESTSIGNING ON
+```
+
+4. 收集到的信息应该包括：
+```
+需要提供的信息
+{
+    1. 基本信息:
+    - 蓝屏代码 (例如: 0x0000007E)
+    - 发生时间
+    - 系统版本
+    
+    2. 详细信息:
+    - 导致崩溃的驱动名称
+    - 崩溃时的调用栈
+    - 相关的内存地址
+    
+    3. 环境信息:
+    - 系统配置
+    - 已安装的驱动
+    - 硬件信息
+}
+```
+
+### 完整验证（推荐用于开发测试）
+verifier /flags 0xFF /driver lykeys.sys
+
+### 基本验证（推荐用于日常测试）
+verifier /standard /driver lykeys.sys
+
+### 内存验证（针对内存问题）
+verifier /flags 0x5 /driver lykeys.sys
+
+### IRQL验证（针对IRQL问题）
+verifier /flags 0x2 /driver lykeys.sys
+
+### 程序闪退cmd命令手动关闭服务
+
+```
+sc query lykeys
+sc stop lykeys
+sc delete lykeys
+
+或者执行快捷命令
+
+// 如果lykeys 服务存在，则停止并删除
+@echo off && sc query lykeys > nul 2>&1 && (echo Service exists, stopping... && sc stop lykeys > nul 2>&1 && timeout /t 2 /nobreak > nul && sc delete lykeys > nul 2>&1 && echo Service deleted successfully && exit) || (echo Service does not exist && exit)
+```

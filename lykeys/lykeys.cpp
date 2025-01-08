@@ -534,56 +534,86 @@ VOID VerificationRoutine(
     UNREFERENCED_PARAMETER(SystemArg2);
 
     PHOOK_PROTECTION protection = (PHOOK_PROTECTION)Context;
-    if (!protection) {
+    if (!protection || !MmIsAddressValid(protection)) {
         KdPrint(("Invalid protection context\n"));
         return;
     }
 
-    // 检查保护是否活动
+    // 检查保护是否活动，使用原子操作避免竞争
     if (InterlockedCompareExchange(&protection->IsProtectionActive, 1, 1) != 1) {
         return;
     }
 
-    // 获取自旋锁
-    KIRQL oldIrql;
-    KeAcquireSpinLock(&protection->ProtectionLock, &oldIrql);
+    // 在函数开始处声明 KIRQL，使其在整个函数范围内可见
+    KIRQL oldIrql = PASSIVE_LEVEL;
+    BOOLEAN lockAcquired = FALSE;
 
+    // 使用 try-except 保护所有内存访问
     __try {
-        // 验证所有受保护区域
+        // 在获取自旋锁之前先验证内存区域的有效性
+        if (!MmIsAddressValid(&protection->ProtectionLock)) {
+            KdPrint(("Invalid protection lock address\n"));
+            return;
+        }
+
+        // 获取自旋锁，使用 IRQL 提升
+        KeAcquireSpinLock(&protection->ProtectionLock, &oldIrql);
+        lockAcquired = TRUE;
+
+        BOOLEAN needsAction = FALSE;
         BOOLEAN codeIntegrity = TRUE;
         BOOLEAN callbackIntegrity = TRUE;
         BOOLEAN driverIntegrity = TRUE;
 
-        if (protection->CodeRegion.StartAddress && protection->CodeRegion.Size) {
+        // 验证代码区域
+        if (protection->CodeRegion.StartAddress && 
+            protection->CodeRegion.Size && 
+            MmIsAddressValid(protection->CodeRegion.StartAddress)) {
             codeIntegrity = VerifyMemoryIntegrity(&protection->CodeRegion);
+            if (!codeIntegrity) needsAction = TRUE;
         }
 
-        if (protection->CallbackRegion.StartAddress && protection->CallbackRegion.Size) {
+        // 验证回调区域
+        if (protection->CallbackRegion.StartAddress && 
+            protection->CallbackRegion.Size && 
+            MmIsAddressValid(protection->CallbackRegion.StartAddress)) {
             callbackIntegrity = VerifyMemoryIntegrity(&protection->CallbackRegion);
+            if (!callbackIntegrity) needsAction = TRUE;
         }
 
-        if (protection->DriverRegion.StartAddress && protection->DriverRegion.Size) {
+        // 验证驱动区域
+        if (protection->DriverRegion.StartAddress && 
+            protection->DriverRegion.Size && 
+            MmIsAddressValid(protection->DriverRegion.StartAddress)) {
             driverIntegrity = VerifyMemoryIntegrity(&protection->DriverRegion);
+            if (!driverIntegrity) needsAction = TRUE;
         }
 
-        // 如果检测到修改，记录日志并触发保护
-        if (!codeIntegrity || !callbackIntegrity || !driverIntegrity) {
-            KdPrint(("Memory integrity check failed: Code=%d, Callback=%d, Driver=%d\n",
-                    codeIntegrity, callbackIntegrity, driverIntegrity));
+        // 如果检测到修改，记录日志并采取行动
+        if (needsAction) {
+            KdPrint(("Memory integrity check failed:\n"));
+            KdPrint(("  Code Region: %s\n", codeIntegrity ? "OK" : "Modified"));
+            KdPrint(("  Callback Region: %s\n", callbackIntegrity ? "OK" : "Modified"));
+            KdPrint(("  Driver Region: %s\n", driverIntegrity ? "OK" : "Modified"));
 
-            // 在实际生产环境中，您可以选择以下任一方式：
-            // 1. 触发蓝屏
-            // 2. 尝试恢复原始状态
-            // 3. 记录事件并通知用户层
-            // 这里我们选择记录事件而不是直接蓝屏
-            
-            KdPrint(("Hook detected! Memory integrity violation.\n"));
+            // 在这里可以实现自定义的保护措施
+            // 例如：记录事件日志、通知用户层应用、触发系统保护机制等
+            // 注意：在自旋锁保护的区域内，不要执行可能导致阻塞的操作
         }
+
+        // 正常路径释放自旋锁
+        if (lockAcquired) {
+            KeReleaseSpinLock(&protection->ProtectionLock, oldIrql);
+            lockAcquired = FALSE;
+        }
+
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         KdPrint(("Exception in VerificationRoutine: 0x%X\n", GetExceptionCode()));
+        // 确保在异常情况下也释放自旋锁
+        if (lockAcquired) {
+            KeReleaseSpinLock(&protection->ProtectionLock, oldIrql);
+        }
     }
-
-    KeReleaseSpinLock(&protection->ProtectionLock, oldIrql);
 }
 
 // 初始化hook保护
@@ -722,6 +752,7 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
     PDEVICE_OBJECT deviceObject = NULL;
     NTSTATUS status;
     BOOLEAN symbolicLinkCreated = FALSE;
+    BOOLEAN hookProtectionInitialized = FALSE;
     
     // 1. 获取系统版本信息
     SYSTEM_VERSION_INFO versionInfo;
@@ -776,7 +807,8 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
 
         if (!deviceObject) {
             KdPrint(("Device object is NULL\n"));
-            return STATUS_UNEXPECTED_IO_ERROR;
+            status = STATUS_UNEXPECTED_IO_ERROR;
+            goto cleanup;
         }
 
         // 6. 设置设备标志
@@ -834,17 +866,25 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
 
             // 保护回调函数
             if (g_KoMCallBack.KeyboardClassServiceCallback) {
-                ProtectCallbackFunction(g_KoMCallBack.KeyboardClassServiceCallback, 
+                status = ProtectCallbackFunction(g_KoMCallBack.KeyboardClassServiceCallback, 
                                       PAGE_SIZE);
+                if (!NT_SUCCESS(status)) {
+                    goto cleanup;
+                }
             }
             if (g_KoMCallBack.MouseClassServiceCallback) {
-                ProtectCallbackFunction(g_KoMCallBack.MouseClassServiceCallback, 
+                status = ProtectCallbackFunction(g_KoMCallBack.MouseClassServiceCallback, 
                                       PAGE_SIZE);
+                if (!NT_SUCCESS(status)) {
+                    goto cleanup;
+                }
             }
 
             // 最后启动保护机制
             status = InitializeHookProtection();
-            if (!NT_SUCCESS(status)) {
+            if (NT_SUCCESS(status)) {
+                hookProtectionInitialized = TRUE;
+            } else {
                 KdPrint(("Warning: Failed to initialize hook protection: 0x%08X\n", status));
                 // 继续运行，不要因为保护初始化失败就退出
                 status = STATUS_SUCCESS;
@@ -861,13 +901,24 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject)
 
 cleanup:
     if (!NT_SUCCESS(status)) {
+        if (hookProtectionInitialized) {
+            CleanupHookProtection();
+        }
         if (symbolicLinkCreated) {
             IoDeleteSymbolicLink(&win32Device);
         }
         if (deviceObject) {
             IoDeleteDevice(deviceObject);
         }
-        CleanupHookProtection();
+        // 清理回调保护
+        if (g_KoMCallBack.KeyboardClassServiceCallback) {
+            UnprotectCallbackFunction(g_KoMCallBack.KeyboardClassServiceCallback);
+        }
+        if (g_KoMCallBack.MouseClassServiceCallback) {
+            UnprotectCallbackFunction(g_KoMCallBack.MouseClassServiceCallback);
+        }
+        // 清理全局回调对象
+        g_KoMCallBack.Clear();
     }
     return status;
 }
@@ -931,44 +982,38 @@ NTSTATUS GetLyKeysInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
     PDEVICE_EXTENSION deviceExtension;
     PDRIVER_OBJECT    hidDriverObject = NULL;
     PDRIVER_OBJECT    classDriverObject = NULL;
+    BOOLEAN           hidDriverReferenced = FALSE;
+    BOOLEAN           classDriverReferenced = FALSE;
 
-    deviceExtension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    __try {
+        deviceExtension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
+        if (!deviceExtension) {
+            status = STATUS_INVALID_PARAMETER;
+            goto cleanup;
+        }
 
-    switch (Index)
-    {
-    case KEYBOARD_DEVICE:
-        baseDeviceName = L"kbd";
-        hidDriverName = L"\\Driver\\kbdhid";
-        classDriverName = L"\\Driver\\kbdclass";
-        TargetDeviceObject = (PVOID*)&(deviceExtension->kbdDeviceObject);
-        TargetclassCallback = (PVOID*)&(deviceExtension->My_KbdCallback);
-        break;
-    case MOUSE_DEVICE:
-        baseDeviceName = L"mou";
-        hidDriverName = L"\\Driver\\mouhid";
-        classDriverName = L"\\Driver\\mouclass";
-        TargetDeviceObject = (PVOID*)&(deviceExtension->mouDeviceObject);
-        TargetclassCallback = (PVOID*)&(deviceExtension->My_MouCallback);
-        break;
-    default:
-        return STATUS_INVALID_PARAMETER;
-    }
+        switch (Index)
+        {
+        case KEYBOARD_DEVICE:
+            baseDeviceName = L"kbd";
+            hidDriverName = L"\\Driver\\kbdhid";
+            classDriverName = L"\\Driver\\kbdclass";
+            TargetDeviceObject = (PVOID*)&(deviceExtension->kbdDeviceObject);
+            TargetclassCallback = (PVOID*)&(deviceExtension->My_KbdCallback);
+            break;
+        case MOUSE_DEVICE:
+            baseDeviceName = L"mou";
+            hidDriverName = L"\\Driver\\mouhid";
+            classDriverName = L"\\Driver\\mouclass";
+            TargetDeviceObject = (PVOID*)&(deviceExtension->mouDeviceObject);
+            TargetclassCallback = (PVOID*)&(deviceExtension->My_MouCallback);
+            break;
+        default:
+            status = STATUS_INVALID_PARAMETER;
+            goto cleanup;
+        }
 
-    // 通过USB类设备获取驱动对象
-    RtlInitUnicodeString(&ObjectName, hidDriverName);
-    status = ObReferenceObjectByName(&ObjectName,
-        OBJ_CASE_INSENSITIVE,
-        NULL,
-        FILE_READ_ACCESS,
-        *IoDriverObjectType,
-        KernelMode,
-        NULL,
-        (PVOID*)&hidDriverObject);
-
-    if (!NT_SUCCESS(status))
-    {
-        // 通过i8042prt获取驱动对象
-        RtlInitUnicodeString(&ObjectName, L"\\Driver\\i8042prt");
+        RtlInitUnicodeString(&ObjectName, hidDriverName);
         status = ObReferenceObjectByName(&ObjectName,
             OBJ_CASE_INSENSITIVE,
             NULL,
@@ -977,69 +1022,103 @@ NTSTATUS GetLyKeysInfo(PDEVICE_OBJECT DeviceObject, USHORT Index)
             KernelMode,
             NULL,
             (PVOID*)&hidDriverObject);
+
         if (!NT_SUCCESS(status))
         {
-            KdPrint(("Couldn't Get the i8042prt Driver Object\n"));
-            return status;
+            RtlInitUnicodeString(&ObjectName, L"\\Driver\\i8042prt");
+            status = ObReferenceObjectByName(&ObjectName,
+                OBJ_CASE_INSENSITIVE,
+                NULL,
+                FILE_READ_ACCESS,
+                *IoDriverObjectType,
+                KernelMode,
+                NULL,
+                (PVOID*)&hidDriverObject);
+            if (!NT_SUCCESS(status))
+            {
+                KdPrint(("Couldn't Get the i8042prt Driver Object\n"));
+                goto cleanup;
+            }
         }
-    }
+        hidDriverReferenced = TRUE;
 
-    // 通过class driver获取键盘鼠标类驱动对象
-    RtlInitUnicodeString(&ObjectName, classDriverName);
-    status = ObReferenceObjectByName(&ObjectName,
-        OBJ_CASE_INSENSITIVE,
-        NULL,
-        FILE_READ_ACCESS,
-        *IoDriverObjectType,
-        KernelMode,
-        NULL,
-        (PVOID*)&classDriverObject);
+        RtlInitUnicodeString(&ObjectName, classDriverName);
+        status = ObReferenceObjectByName(&ObjectName,
+            OBJ_CASE_INSENSITIVE,
+            NULL,
+            FILE_READ_ACCESS,
+            *IoDriverObjectType,
+            KernelMode,
+            NULL,
+            (PVOID*)&classDriverObject);
 
-    if (!NT_SUCCESS(status))
-    {
-        KdPrint(("Couldn't Get the Class Driver Object\n"));
-        return status;
-    }
-    else
-    {
+        if (!NT_SUCCESS(status))
+        {
+            KdPrint(("Couldn't Get the Class Driver Object\n"));
+            goto cleanup;
+        }
+        classDriverReferenced = TRUE;
+
         classDriverStart = classDriverObject->DriverStart;
         classDriverSize = classDriverObject->DriverSize;
+
+        ULONG             DeviceExtensionSize;
+        PULONG            deviceExt;
+        PDEVICE_OBJECT    tempDeviceObject;
+        PDEVICE_OBJECT    currentDeviceObject = classDriverObject->DeviceObject;
+        
+        while (currentDeviceObject && MmIsAddressValid(currentDeviceObject))
+        {
+            tempDeviceObject = currentDeviceObject;
+            while (tempDeviceObject && MmIsAddressValid(tempDeviceObject))
+            {
+                deviceExt = (PULONG)tempDeviceObject->DeviceExtension;
+                if (!MmIsAddressValid(deviceExt)) {
+                    break;
+                }
+                
+                currentDeviceObject = classDriverObject->DeviceObject;
+                DeviceExtensionSize = ((ULONG)tempDeviceObject->DeviceObjectExtension - (ULONG)tempDeviceObject->DeviceExtension) / 4;
+                
+                while (currentDeviceObject && MmIsAddressValid(currentDeviceObject))
+                {
+                    for (ULONG i = 0; i < DeviceExtensionSize - 1; i++)
+                    {
+                        if (!MmIsAddressValid(&deviceExt[i]) || !MmIsAddressValid(&deviceExt[i + 1])) {
+                            break;
+                        }
+
+                        if (deviceExt[i] == (ULONG)currentDeviceObject &&
+                            deviceExt[i + 1] > (ULONG)classDriverStart &&
+                            deviceExt[i + 1] < (ULONG)classDriverStart + classDriverSize)
+                        {
+                            *TargetDeviceObject = (PVOID)deviceExt[i];
+                            *TargetclassCallback = (PVOID)deviceExt[i + 1];
+                            KdPrint(("%SDeviceObject == 0x%x\n", baseDeviceName, deviceExt[i]));
+                            KdPrint(("%SClassServiceCallback == 0x%x\n", baseDeviceName, deviceExt[i + 1]));
+                            status = STATUS_SUCCESS;
+                            goto cleanup;
+                        }
+                    }
+                    currentDeviceObject = currentDeviceObject->NextDevice;
+                }
+                tempDeviceObject = tempDeviceObject->AttachedDevice;
+            }
+            currentDeviceObject = currentDeviceObject->NextDevice;
+        }
+        status = STATUS_UNSUCCESSFUL;
+
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        KdPrint(("Exception in GetLyKeysInfo: 0x%X\n", GetExceptionCode()));
+        status = STATUS_UNSUCCESSFUL;
     }
 
-    ULONG             DeviceExtensionSize;
-    PULONG            deviceExt;
-    PDEVICE_OBJECT    tempDeviceObject;
-    PDEVICE_OBJECT    currentDeviceObject = classDriverObject->DeviceObject;
-    
-    while (currentDeviceObject)
-    {
-        tempDeviceObject = currentDeviceObject;
-        while (tempDeviceObject)
-        {
-            deviceExt = (PULONG)tempDeviceObject->DeviceExtension;
-            currentDeviceObject = classDriverObject->DeviceObject;
-            DeviceExtensionSize = ((ULONG)tempDeviceObject->DeviceObjectExtension - (ULONG)tempDeviceObject->DeviceExtension) / 4;
-            while (currentDeviceObject)
-            {
-                for (ULONG i = 0; i < DeviceExtensionSize; i++)
-                {
-                    if (deviceExt[i] == (ULONG)currentDeviceObject &&
-                        deviceExt[i + 1] > (ULONG)classDriverStart &&
-                        deviceExt[i + 1] < (ULONG)classDriverStart + classDriverSize)
-                    {
-                        // 将获取到的设备对象保存到自定义扩展设备结构
-                        *TargetDeviceObject = (PVOID)deviceExt[i];
-                        *TargetclassCallback = (PVOID)deviceExt[i + 1];
-                        KdPrint(("%SDeviceObject == 0x%x\n", baseDeviceName, deviceExt[i]));
-                        KdPrint(("%SClassServiceCallback == 0x%x\n", baseDeviceName, deviceExt[i + 1]));
-                        return STATUS_SUCCESS;
-                    }
-                }
-                currentDeviceObject = currentDeviceObject->NextDevice;
-            }
-            tempDeviceObject = tempDeviceObject->AttachedDevice;
-        }
-        currentDeviceObject = currentDeviceObject->NextDevice;
+cleanup:
+    if (hidDriverReferenced && hidDriverObject) {
+        ObDereferenceObject(hidDriverObject);
     }
-    return STATUS_UNSUCCESSFUL;
+    if (classDriverReferenced && classDriverObject) {
+        ObDereferenceObject(classDriverObject);
+    }
+    return status;
 }
