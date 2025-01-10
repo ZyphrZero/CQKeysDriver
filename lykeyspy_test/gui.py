@@ -287,10 +287,9 @@ class LYKeysGUI:
         duration_frame.pack(fill=tk.X, pady=(0,5))
         
         ttk.Label(duration_frame, text="运行时长(秒):").pack(side=tk.LEFT, padx=5)
-        self.duration_var = tk.StringVar(value="0")
+        self.duration_var = tk.StringVar(value="1")
         self.duration_entry = ttk.Entry(duration_frame, textvariable=self.duration_var, width=8, font=self.default_font)
         self.duration_entry.pack(side=tk.LEFT, padx=5)
-        ttk.Label(duration_frame, text="(0表示无限运行)").pack(side=tk.LEFT, padx=5)
 
         # 状态显示框架
         status_frame = ttk.LabelFrame(right_settings, text="运行状态", padding="5")
@@ -1116,6 +1115,16 @@ class LYKeysGUI:
                     
                 press_time = int(self.press_time_var.get())
                 interval_time = int(self.interval_time_var.get())
+                
+                # 获取运行时长并验证
+                try:
+                    duration = float(self.duration_var.get())
+                    if duration < 1:
+                        messagebox.showerror("错误", "运行时长必须大于等于1秒！")
+                        return
+                except ValueError:
+                    messagebox.showerror("错误", "请输入有效的运行时长！")
+                    return
                 
                 # if press_time <= 0 or interval_time <= 0:
                 #     messagebox.showerror("错误", "时间间隔必须大于0！")
