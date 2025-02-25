@@ -137,13 +137,6 @@ bool IsDebuggerPresentEx() {
 	return (NT_SUCCESS(status) && debugPort) || isDebuggerPresent;
 }
 
-// 反调试保护宏
-#define ANTI_DEBUG_CHECK() \
-	if (IsDebuggerPresentEx()) { \
-		SetLastError(ERROR_ACCESS_DENIED); \
-		return FALSE; \
-	}
-
 typedef LONG NTSTATUS;
 typedef NTSTATUS (WINAPI *pfnRtlGetVersion)(PRTL_OSVERSIONINFOW);
 
@@ -364,8 +357,6 @@ extern "C" __declspec(dllexport) HANDLE __cdecl GetDriverHandle()
 // SetHandle函数
 BOOL SetHandle()
 {
-	ANTI_DEBUG_CHECK();
-
 	// 检查是否已经有有效句柄
 	if (drvhandle != NULL && drvhandle != INVALID_HANDLE_VALUE) {
 		CloseHandle(drvhandle);
@@ -678,8 +669,6 @@ void __cdecl MouseWheelDown(USHORT wheelDelta)
 // 装载驱动程序
 BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 {
-	ANTI_DEBUG_CHECK();
-
 	// 先检查驱动是否已经加载
 	if (drvhandle != NULL && drvhandle != INVALID_HANDLE_VALUE) {
 		printf("Driver already loaded!\n");
@@ -831,8 +820,6 @@ cleanup:
 // 卸载驱动程序  
 BOOL __cdecl UnloadNTDriver(char* szSvrName)
 {
-	ANTI_DEBUG_CHECK();
-
 	BOOL bRet = FALSE;
 	SC_HANDLE hServiceMgr = NULL;	// SCM管理器的句柄
 	SC_HANDLE hServiceDDK = NULL;	// NT驱动程序的服务句柄
