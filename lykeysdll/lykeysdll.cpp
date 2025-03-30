@@ -151,20 +151,24 @@ typedef struct _DLL_SYSTEM_INFO {
 
 // 设备状态枚举扩展
 typedef enum _DEVICE_STATUS {
-	DEVICE_STATUS_UNKNOWN = 0,
-	DEVICE_STATUS_READY = 1,
-	DEVICE_STATUS_ERROR = 2
+	DEVICE_STATUS_UNKNOWN = 0,	// 未知状态
+	DEVICE_STATUS_READY = 1,	// 准备就绪
+	DEVICE_STATUS_ERROR = 2,	// 错误状态
+	DEVICE_STATUS_NO_KEYBOARD = 3,  // 无法找到键盘设备
+	DEVICE_STATUS_NO_MOUSE = 4,     // 无法找到鼠标设备
+	DEVICE_STATUS_INIT_FAILED = 5   // 初始化失败
 } DEVICE_STATUS;
 
 // 设备状态结构体
 typedef struct _DEVICE_STATE_INFO {
 	std::atomic<DEVICE_STATUS> status;
 	std::atomic<ULONGLONG> lastCheckTime;
+	std::atomic<int> detailedErrorCode;   // 详细错误代码
 } DEVICE_STATE_INFO;
 
 // 全局状态变量
 namespace {
-	DEVICE_STATE_INFO g_DriverState = { DEVICE_STATUS_UNKNOWN, 0 };
+	DEVICE_STATE_INFO g_DriverState = { DEVICE_STATUS_UNKNOWN, 0, 0 };
 }
 
 // 获取系统时间的辅助函数
@@ -304,6 +308,7 @@ DEVICE_STATUS CheckDriverStatus(HANDLE deviceHandle)
 {
 	if (deviceHandle == INVALID_HANDLE_VALUE || deviceHandle == NULL) {
 		printf("Error: Invalid device handle\n");
+		g_DriverState.detailedErrorCode = 1001; // 句柄无效错误
 		return DEVICE_STATUS_ERROR;
 	}
 
@@ -311,19 +316,45 @@ DEVICE_STATUS CheckDriverStatus(HANDLE deviceHandle)
 	DWORD bytesReturned = 0;
 	DWORD lastError = 0;
 	
-	if (!DeviceIoControl(deviceHandle, 
-		IOCTL_KEYBOARD,  // 任意一个IOCTL都可以用来测试驱动状态
+	// 先尝试检查键盘设备
+	bool keyboardAvailable = DeviceIoControl(deviceHandle, 
+		IOCTL_KEYBOARD,
 		NULL, 0,
 		NULL, 0,
 		&bytesReturned,
-		NULL)) 
-	{
+		NULL);
+	
+	if (!keyboardAvailable) {
 		lastError = GetLastError();
-		printf("Error: DeviceIoControl failed, error code: %d\n", lastError);
-		return DEVICE_STATUS_ERROR;
+		g_DriverState.detailedErrorCode = 2001; // 键盘设备不可用
+		printf("Error: Keyboard device not available, error code: %d\n", lastError);
+	}
+	
+	// 再检查鼠标设备
+	bool mouseAvailable = DeviceIoControl(deviceHandle, 
+		IOCTL_MOUSE,
+		NULL, 0,
+		NULL, 0,
+		&bytesReturned,
+		NULL);
+	
+	if (!mouseAvailable) {
+		lastError = GetLastError();
+		g_DriverState.detailedErrorCode = 3001; // 鼠标设备不可用
+		printf("Error: Mouse device not available, error code: %d\n", lastError);
+	}
+	
+	// 根据检查结果返回不同状态
+	if (!keyboardAvailable && !mouseAvailable) {
+		return DEVICE_STATUS_NO_KEYBOARD; // 键盘和鼠标设备都不可用，报告键盘不可用
+	} else if (!keyboardAvailable) {
+		return DEVICE_STATUS_NO_KEYBOARD; // 只有键盘设备不可用
+	} else if (!mouseAvailable) {
+		return DEVICE_STATUS_NO_MOUSE; // 只有鼠标设备不可用
 	}
 
-	return DEVICE_STATUS_READY;
+	g_DriverState.detailedErrorCode = 0; // 无错误
+	return DEVICE_STATUS_READY; // 键盘和鼠标设备都可用
 }
 
 // 导出函数：检查驱动状态
@@ -352,6 +383,12 @@ extern "C" __declspec(dllexport) ULONGLONG __cdecl GetLastCheckTime()
 extern "C" __declspec(dllexport) HANDLE __cdecl GetDriverHandle()
 {
 	return drvhandle;
+}
+
+// 添加导出函数：获取详细错误代码
+extern "C" __declspec(dllexport) int __cdecl GetDetailedErrorCode()
+{
+	return g_DriverState.detailedErrorCode;
 }
 
 // SetHandle函数
@@ -387,7 +424,9 @@ BOOL SetHandle()
 	DEVICE_STATUS status = g_DriverState.status.load();
 	printf("Driver Status: %s\n", 
 		status == DEVICE_STATUS_READY ? "Ready" :
-		status == DEVICE_STATUS_ERROR ? "Error" : "Unknown");
+		status == DEVICE_STATUS_ERROR ? "Error" :
+		status == DEVICE_STATUS_NO_KEYBOARD ? "No Keyboard" :
+		status == DEVICE_STATUS_NO_MOUSE ? "No Mouse" : "Unknown");
 	
 	return status == DEVICE_STATUS_READY;
 }
