@@ -1,77 +1,57 @@
-;
-; cqkeys.inf
-;
-
 [Version]
 Signature="$WINDOWS NT$"
-Class=System ; 改用System类而不是Sample
-ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318} ; System类的GUID
-Provider=%ManufacturerName%
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%Manufacturer%
 CatalogFile=cqkeys.cat
-DriverVer=01/01/2024,1.0.0.1
+DriverVer=10/20/2026,2.0.0.0
 PnpLockdown=1
 
 [DestinationDirs]
-DefaultDestDir = 12
-cqkeys_Device_CoInstaller_CopyFiles = 11
+DriverCopy=13
 
 [SourceDisksNames]
-1 = %DiskName%,,,""
+1=%DiskName%,,,
 
 [SourceDisksFiles]
-cqkeys.sys  = 1,,
-WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1
-
-;*****************************************
-; Install Section
-;*****************************************
+cqkeys.sys=1
 
 [Manufacturer]
-%ManufacturerName%=Standard,NT$ARCH$
+%Manufacturer%=Models,NTamd64.10.0...16299
 
-[Standard.NT$ARCH$]
-%cqkeys.DeviceDesc%=cqkeys_Device, Root\cqkeys
+[Models.NTamd64.10.0...16299]
+%DeviceDescription%=Install,ROOT\CQKEYSVHF
 
-[cqkeys_Device.NT]
-CopyFiles=Drivers_Dir
+[Install.NT]
+CopyFiles=DriverCopy
 
-[Drivers_Dir]
+[DriverCopy]
 cqkeys.sys
 
-;-------------- Service installation
-[cqkeys_Device.NT.Services]
-AddService = cqkeys,%SPSVCINST_ASSOCSERVICE%, cqkeys_Service_Inst
+[Install.NT.HW]
+AddReg=DeviceSettings
 
-; -------------- cqkeys driver install sections
-[cqkeys_Service_Inst]
-DisplayName    = %cqkeys.SVCDESC%
-ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
-StartType      = 3               ; SERVICE_DEMAND_START
-ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %12%\cqkeys.sys
+[DeviceSettings]
+HKR,,"LowerFilters",0x00010000,"vhf"
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)"
 
-;
-;--- cqkeys_Device Coinstaller installation ------
-;
+[Install.NT.Services]
+AddService=cqkeys_vhf,0x00000002,Service
 
-[cqkeys_Device.NT.CoInstallers]
-AddReg=cqkeys_Device_CoInstaller_AddReg
-CopyFiles=cqkeys_Device_CoInstaller_CopyFiles
+[Service]
+DisplayName=%DeviceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\cqkeys.sys
 
-[cqkeys_Device_CoInstaller_AddReg]
-HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
+[Install.NT.Wdf]
+KmdfService=cqkeys_vhf,Wdf
 
-[cqkeys_Device_CoInstaller_CopyFiles]
-WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
-
-[cqkeys_Device.NT.Wdf]
-KmdfService =  cqkeys, cqkeys_wdfsect
-[cqkeys_wdfsect]
-KmdfLibraryVersion = $KMDFVERSION$
+[Wdf]
+KmdfLibraryVersion=1.15
 
 [Strings]
-SPSVCINST_ASSOCSERVICE= 0x00000002
-ManufacturerName="CQDLL"
-DiskName = "CQDLL Installation Disk"
-cqkeys.DeviceDesc = "CQDLL Keyboard Mouse Driver"
-cqkeys.SVCDESC = "CQDLL Keyboard Mouse Service"
+Manufacturer="CQDLL"
+DiskName="CQKeys VHF Driver"
+DeviceDescription="CQKeys Virtual HID Input Device"

@@ -14,7 +14,7 @@ namespace CqKeys
             _driverService.StatusChanged += DriverService_StatusChanged;
             
             // 显示驱动路径
-            DriverPathText.Text = $"驱动路径: {_driverService.DriverPath}";
+            DriverPathText.Text = $"设备: {_driverService.DriverPath}。请先使用安装工具安装 VHF 驱动包。";
             
             UpdateButtonStates();
         }
@@ -32,25 +32,25 @@ namespace CqKeys
 
         private void UpdateButtonStates()
         {
-            InstallButton.IsEnabled = !_driverService.IsDriverInstalled;
-            UninstallButton.IsEnabled = _driverService.IsDriverInstalled;
+            ConnectButton.IsEnabled = !_driverService.IsConnected;
+            DisconnectButton.IsEnabled = _driverService.IsConnected;
         }
 
-        private async void InstallButton_Click(object sender, RoutedEventArgs e)
+        private async void ConnectButton_Click(object sender, RoutedEventArgs e)
         {
             try
             {
-                InstallButton.IsEnabled = false;
-                await _driverService.InitializeDriverAsync();
+                ConnectButton.IsEnabled = false;
+                await _driverService.ConnectAsync();
             }
             catch (UnauthorizedAccessException)
             {
-                MessageBox.Show("需要管理员权限才能安装驱动。\n请以管理员身份运行程序。", 
+                MessageBox.Show("需要管理员权限才能连接设备。\n请以管理员身份运行程序。",
                     "权限错误", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"安装驱动时发生错误：{ex.Message}", 
+                MessageBox.Show($"连接设备时发生错误：{ex.Message}",
                     "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally
@@ -59,16 +59,16 @@ namespace CqKeys
             }
         }
 
-        private async void UninstallButton_Click(object sender, RoutedEventArgs e)
+        private async void DisconnectButton_Click(object sender, RoutedEventArgs e)
         {
             try
             {
-                UninstallButton.IsEnabled = false;
-                await _driverService.UninstallDriverAsync();
+                DisconnectButton.IsEnabled = false;
+                await _driverService.DisconnectAsync();
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"卸载驱动时发生错误：{ex.Message}", 
+                MessageBox.Show($"断开设备时发生错误：{ex.Message}",
                     "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally

@@ -100,10 +100,5 @@
     <Compile Include="DriverManager.cs" />
     <Compile Include="DriverService.cs" />
   </ItemGroup>
-  <ItemGroup>
-    <Content Include="dll\**\*.*">
-        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

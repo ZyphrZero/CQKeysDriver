@@ -1,41 +1,19 @@
 # -*- coding: utf-8 -*-
 
-import os
+import argparse
 import time
-from ctypes import CDLL
-import sys
-import ctypes
+from driver_manager import DriverManager
 
 class SimpleInputTester:
-    def __init__(self, dll_path=None, sys_path=None):
-        # 检查管理员权限
-        if not ctypes.windll.shell32.IsUserAnAdmin():
-            print("请以管理员权限运行此脚本")
-            sys.exit(1)
-
-        # 设置默认路径
-        if not dll_path or not sys_path:
-            base_dir = os.path.dirname(os.path.dirname(__file__))
-            self.dll_path = dll_path or os.path.join(base_dir, 'cqkeysdll', 'x64', 'Debug', 'cqkeysdll.dll')
-            self.sys_path = sys_path or os.path.join(base_dir, 'cqkeys', 'x64', 'Debug', 'cqkeys', 'cqkeys.sys')
-
-        # 加载驱动
-        self.driver = CDLL(self.dll_path)
-        
-        # 先尝试卸载已存在的驱动
-        self.driver.UnloadNTDriver(b'cqkeys')
-        
-        # 加载驱动
-        if not self.driver.LoadNTDriver(b'cqkeys', self.sys_path.encode()):
-            raise RuntimeError("驱动加载失败")
-        
-        # 设置句柄
-        self.driver.SetHandle()
+    def __init__(self, dll_path=None):
+        self.manager = DriverManager(dll_path)
+        if not self.manager.connect():
+            raise RuntimeError("设备连接失败")
+        self.driver = self.manager.get_driver()
 
     def cleanup(self):
-        """清理驱动"""
-        if self.driver:
-            self.driver.UnloadNTDriver(b'cqkeys')
+        """关闭设备连接。"""
+        self.manager.disconnect()
 
     def press_key(self, key):
         """按下并释放按键"""
@@ -71,8 +49,10 @@ class SimpleInputTester:
     def type_string(self, text, interval=0.05):
         """输入字符串"""
         for char in text:
-            self.press_key(char)
+            if not self.press_key(char):
+                return False
             time.sleep(interval)
+        return True
 
     def _get_virtual_key_code(self, key):
         """获取虚拟键码"""
@@ -118,23 +98,21 @@ class SimpleInputTester:
         return char.isupper() or char in shift_chars
 
 def main():
-    # 创建测试实例
-    tester = SimpleInputTester()
+    parser = argparse.ArgumentParser(description="向当前前台窗口输入文本")
+    parser.add_argument("--dll", help="cqkeysdll.dll 路径")
+    parser.add_argument("--text", default="Hello, World!", help="要输入的文本")
+    args = parser.parse_args()
+    tester = SimpleInputTester(args.dll)
     
     try:
         # 等待用户准备
-        print("驱动已加载，3秒后开始输入...")
+        print("设备已连接，请切换到目标窗口，3秒后开始输入...")
         time.sleep(3)
         
-        # # 测试空格
-        # print("测试空格输入")
-        # tester.press_key(' ')
-        # time.sleep(1)
-        
-        # 测试字符串
-        test_string = "Hello, World!"
+        test_string = args.text
         print(f"测试字符串输入: {test_string}")
-        tester.type_string(test_string)
+        if not tester.type_string(test_string):
+            raise RuntimeError("文本输入未完成")
         
     except Exception as e:
         print(f"测试出错: {str(e)}")
@@ -143,4 +121,4 @@ def main():
         tester.cleanup()
 
 if __name__ == '__main__':
-    main() 
+    main()

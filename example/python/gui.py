@@ -4,7 +4,7 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
-from driver_manager import DriverManager
+from driver_manager import DriverManager, DEFAULT_DLL_PATH
 from input_tester import InputTester
 from virtuakeys_mapping import VirtualKeys
 import logging
@@ -61,13 +61,12 @@ class CQKeysGUI:
         # 驱动相关
         self.driver_mgr = None
         self.input_tester = None
-        self.is_driver_loaded = False
+        self.is_connected = False
         self.is_closing = False
-        self.config_file = "driver_config.json"
+        self.config_file = os.path.join(os.path.dirname(__file__), "driver_config.json")
         
         # 路径配置变量（在创建根窗口后创建）
-        self.dll_path_var = tk.StringVar()
-        self.sys_path_var = tk.StringVar()
+        self.dll_path_var = tk.StringVar(value=str(DEFAULT_DLL_PATH))
         
         # 测试相关变量
         self.test_key_var = tk.StringVar(value="a")
@@ -124,8 +123,8 @@ class CQKeysGUI:
         self.load_auto_move_config()
         
         # 如果没有配置路径，显示提示消息
-        if not self.dll_path_var.get() or not self.sys_path_var.get():
-            logging.warning("请先在驱动路径配置中设置DLL和SYS文件路径")
+        if not self.dll_path_var.get():
+            logging.warning("请先安装 VHF 驱动包，并配置新构建的 DLL 路径")
         
         # 创建功能标签页
         self.create_driver_tab()
@@ -145,10 +144,10 @@ class CQKeysGUI:
         driver_frame = ttk.LabelFrame(driver_tab, text="驱动控制", padding="5")
         driver_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        self.load_btn = ttk.Button(driver_frame, text="安装驱动", command=self._load_driver)
+        self.load_btn = ttk.Button(driver_frame, text="连接设备", command=self._connect_device)
         self.load_btn.pack(side=tk.LEFT, padx=5)
         
-        self.unload_btn = ttk.Button(driver_frame, text="卸载驱动", command=self._unload_driver, state=tk.DISABLED)
+        self.unload_btn = ttk.Button(driver_frame, text="断开设备", command=self._disconnect_device, state=tk.DISABLED)
         self.unload_btn.pack(side=tk.LEFT, padx=5)
         
         # 状态检查区域
@@ -556,7 +555,7 @@ class CQKeysGUI:
         
         if self.driver_mgr:
             try:
-                self.driver_mgr.cleanup()
+                self.driver_mgr.disconnect()
             except Exception as e:
                 print(f"清理驱动时出错: {str(e)}")  # 使用print而不是logging
         self.root.destroy()
@@ -607,9 +606,9 @@ class CQKeysGUI:
         logging.getLogger().addHandler(handler)
         logging.getLogger().setLevel(logging.INFO)
     
-    def _update_button_states(self, driver_loaded):
+    def _update_button_states(self, connected):
         """更新按钮状态"""
-        state = tk.NORMAL if driver_loaded else tk.DISABLED
+        state = tk.NORMAL if connected else tk.DISABLED
         self.unload_btn.config(state=state)
         self.test_key_btn.config(state=state)
         self.test_input_btn.config(state=state)
@@ -618,36 +617,25 @@ class CQKeysGUI:
         self.clear_btn.config(state=state)
         self.input_entry.config(state=state)
         self.check_status_btn.config(state=state)
-        self.load_btn.config(state=tk.DISABLED if driver_loaded else tk.NORMAL)
+        self.load_btn.config(state=tk.DISABLED if connected else tk.NORMAL)
         self.rapid_test_btn.config(state=state)
     
-    def _load_driver(self):
+    def _connect_device(self):
         """加载驱动"""
         try:
             # 获取当前设置的路径
             dll_path = self.dll_path_var.get()
-            sys_path = self.sys_path_var.get()
             
             # 检查路径是否已配置
-            if not dll_path or not sys_path:
-                messagebox.showerror("错误", "请先配置驱动路径")
+            if not dll_path:
+                messagebox.showerror("错误", "请先配置新构建的 DLL 路径")
                 return
             
-            self.driver_mgr = DriverManager()
+            self.driver_mgr = DriverManager(dll_path)
             
-            # 使用配置的路径
-            try:
-                self.driver_mgr._setup_paths(dll_path=dll_path, sys_path=sys_path)
-            except ValueError as ve:
-                messagebox.showerror("错误", str(ve))
-                return
-            except FileNotFoundError as fe:
-                messagebox.showerror("错误", str(fe))
-                return
-            
-            if self.driver_mgr.initialize():
+            if self.driver_mgr.connect():
                 self.input_tester = InputTester(self.driver_mgr.get_driver())
-                self.is_driver_loaded = True
+                self.is_connected = True
                 self._update_button_states(True)
                 self._check_driver_status()  # 初始检查驱动状态
             else:
@@ -656,14 +644,14 @@ class CQKeysGUI:
             messagebox.showerror("错误", f"驱动加载出错: {str(e)}")
             logging.error(f"驱动加载出错: {str(e)}")
     
-    def _unload_driver(self):
+    def _disconnect_device(self):
         """卸载驱动"""
         try:
             if self.driver_mgr:
-                self.driver_mgr.cleanup()
+                self.driver_mgr.disconnect()
                 self.driver_mgr = None
                 self.input_tester = None
-                self.is_driver_loaded = False
+                self.is_connected = False
                 self._update_button_states(False)
                 self.driver_status.config(text="驱动状态: 未加载")
                 self.last_check.config(text="上次检查: 未检查")
@@ -854,12 +842,12 @@ class CQKeysGUI:
     
     def _on_input_submit(self, event):
         """处理Enter键提交事件"""
-        if self.is_driver_loaded:
+        if self.is_connected:
             self._send_input_text()
 
     def _on_submit_click(self):
         """处理提交按钮点击事件"""
-        if self.is_driver_loaded:
+        if self.is_connected:
             self._send_input_text()
 
     def _clear_text(self):
@@ -971,47 +959,30 @@ class CQKeysGUI:
         # 使用已经在__init__中创建的StringVar
         self.dll_path_entry = ttk.Entry(path_frame, textvariable=self.dll_path_var, width=30, font=self.default_font)
         self.dll_path_entry.grid(row=0, column=1, padx=5)
-        ttk.Button(path_frame, text="浏览", command=lambda: self.browse_file("dll")).grid(row=0, column=2)
-        
-        # SYS路径配置
-        ttk.Label(path_frame, text="SYS路径:").grid(row=1, column=0, sticky="w")
-        # 使用已经在__init__中创建的StringVar
-        self.sys_path_entry = ttk.Entry(path_frame, textvariable=self.sys_path_var, width=30, font=self.default_font)
-        self.sys_path_entry.grid(row=1, column=1, padx=5)
-        ttk.Button(path_frame, text="浏览", command=lambda: self.browse_file("sys")).grid(row=1, column=2)
+        ttk.Button(path_frame, text="浏览", command=self.browse_file).grid(row=0, column=2)
         
         # 保存配置按钮
-        ttk.Button(path_frame, text="保存配置", command=self.save_path_config).grid(row=2, column=1, pady=5)
+        ttk.Button(path_frame, text="保存配置", command=self.save_path_config).grid(row=1, column=1, pady=5)
     
-    def browse_file(self, file_type):
-        """浏览文件对话框
-        
-        Args:
-            file_type (str): 文件类型，"dll" 或 "sys"
-        """
-        filetypes = [("DLL files", "*.dll")] if file_type == "dll" else [("SYS files", "*.sys")]
-        filename = filedialog.askopenfilename(filetypes=filetypes)
+    def browse_file(self):
+        """选择客户端 DLL。"""
+        filename = filedialog.askopenfilename(filetypes=[("DLL files", "*.dll")])
         if filename:
-            if file_type == "dll":
-                self.dll_path_var.set(filename)
-            else:
-                self.sys_path_var.set(filename)
+            self.dll_path_var.set(filename)
     
     def save_path_config(self):
         """保存路径配置到文件"""
         # 获取当前路径设置
         dll_path = self.dll_path_var.get().strip()
-        sys_path = self.sys_path_var.get().strip()
         
         # 验证路径
-        if not dll_path or not sys_path:
-            logging.error("DLL路径和SYS路径不能为空")
+        if not dll_path:
+            logging.error("DLL路径不能为空")
             return
             
         config = {
             # 驱动路径配置
             "dll_path": dll_path,
-            "sys_path": sys_path,
             
             # 高频按键测试配置
             "rapid_test": {
@@ -1040,14 +1011,11 @@ class CQKeysGUI:
                     
                 # 加载驱动路径配置
                 dll_path = config.get("dll_path", "")
-                sys_path = config.get("sys_path", "")
                 
                 # 设置路径变量
                 if dll_path:
                     self.dll_path_var.set(dll_path)
                     
-                if sys_path:
-                    self.sys_path_var.set(sys_path)
                 
                 # 加载高频按键测试配置
                 rapid_test_config = config.get("rapid_test", {})
@@ -1065,16 +1033,14 @@ class CQKeysGUI:
         """初始化驱动"""
         try:
             dll_path = self.dll_path_var.get()
-            sys_path = self.sys_path_var.get()
             
-            if not dll_path or not sys_path:
-                logging.error("请先设置DLL和SYS文件路径！")
+            if not dll_path:
+                logging.error("请先设置新构建的 DLL 文件路径！")
                 return False
             
-            self.driver_mgr = DriverManager()
-            self.driver_mgr._setup_paths(dll_path=dll_path, sys_path=sys_path)
+            self.driver_mgr = DriverManager(dll_path)
             
-            if self.driver_mgr.initialize():
+            if self.driver_mgr.connect():
                 self.input_tester = InputTester(self.driver_mgr.get_driver())
                 logging.info("驱动初始化成功！")
                 return True
@@ -1092,7 +1058,7 @@ class CQKeysGUI:
         
         # 确保程序退出时清理资源
         if self.driver_mgr:
-            self.driver_mgr.cleanup()
+            self.driver_mgr.disconnect()
     
     def _toggle_rapid_test(self):
         """切换高频按键测试状态"""
@@ -1103,7 +1069,7 @@ class CQKeysGUI:
             # 开始测试
             try:
                 # 检查驱动状态
-                if not self.is_driver_loaded or not self.input_tester:
+                if not self.is_connected or not self.input_tester:
                     messagebox.showerror("错误", "请先加载驱动！")
                     return
                 
@@ -1186,7 +1152,7 @@ class CQKeysGUI:
             last_update_time = start_time
             last_press_time = start_time
             
-            while self.rapid_test_running and self.is_driver_loaded:
+            while self.rapid_test_running and self.is_connected:
                 current_time = time.perf_counter()
                 elapsed_time = current_time - start_time
                 
@@ -1331,7 +1297,7 @@ class CQKeysGUI:
         def run_test():
             try:
                 # 检查驱动状态
-                if not self.is_driver_loaded or not self.input_tester:
+                if not self.is_connected or not self.input_tester:
                     logging.error("驱动未加载或测试器未初始化")
                     messagebox.showerror("错误", "请先加载驱动")
                     return
@@ -1398,7 +1364,7 @@ class CQKeysGUI:
         def run_test():
             try:
                 # 检查驱动状态
-                if not self.is_driver_loaded or not self.input_tester:
+                if not self.is_connected or not self.input_tester:
                     logging.error("驱动未加载或测试器未初始化")
                     messagebox.showerror("错误", "请先加载驱动")
                     return
@@ -1459,7 +1425,7 @@ class CQKeysGUI:
         def run_move():
             try:
                 # 检查驱动状态
-                if not self.is_driver_loaded or not self.input_tester:
+                if not self.is_connected or not self.input_tester:
                     logging.error("驱动未加载或测试器未初始化")
                     messagebox.showerror("错误", "请先加载驱动")
                     return
@@ -1504,7 +1470,7 @@ class CQKeysGUI:
         def run_test():
             try:
                 # 检查驱动状态
-                if not self.is_driver_loaded or not self.input_tester:
+                if not self.is_connected or not self.input_tester:
                     logging.error("驱动未加载或测试器未初始化")
                     messagebox.showerror("错误", "请先加载驱动")
                     return
@@ -1558,7 +1524,7 @@ class CQKeysGUI:
         def run_test():
             try:
                 # 检查驱动状态
-                if not self.is_driver_loaded or not self.input_tester:
+                if not self.is_connected or not self.input_tester:
                     logging.error("驱动未加载或测试器未初始化")
                     messagebox.showerror("错误", "请先加载驱动")
                     return
@@ -1645,7 +1611,7 @@ class CQKeysGUI:
 
     def _toggle_auto_move(self):
         """切换自动移动状态"""
-        if not self.is_driver_loaded or not self.input_tester:
+        if not self.is_connected or not self.input_tester:
             messagebox.showerror("错误", "请先加载驱动")
             return
             
@@ -1752,7 +1718,6 @@ class CQKeysGUI:
             # 保存到文件
             config = {
                 'dll_path': self.dll_path_var.get(),
-                'sys_path': self.sys_path_var.get(),
                 'rapid_test': {
                     'test_key': self.test_key_var.get(),
                     'press_time': self.press_time_var.get(),
@@ -1791,4 +1756,4 @@ if __name__ == '__main__':
         
     except Exception as e:
         # 其他未预期的错误
-        messagebox.showerror("错误", f"程序运行出错: {str(e)}") 
+        messagebox.showerror("错误", f"程序运行出错: {str(e)}")
