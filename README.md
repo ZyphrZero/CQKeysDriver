@@ -1,5 +1,23 @@
 # LingYaoDriver
 
+## 本地构建
+
+已验证的构建环境：Visual Studio 2026、MSVC v143（14.44）、Windows SDK / WDK 28000.2526。
+在 Visual Studio Installer 中安装“使用 C++ 的桌面开发”、MSVC v143 和“Windows Driver Kit”组件，
+并安装配套的 Windows SDK 与 WDK。
+
+在仓库根目录使用 PowerShell 构建 x64 Debug 版本：
+
+```powershell
+$msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find 'MSBuild\**\Bin\amd64\MSBuild.exe' | Select-Object -First 1
+& $msbuild .\lykeysdll\lykeysdll.vcxproj /t:Build /p:Configuration=Debug /p:Platform=x64
+& $msbuild .\lykeys\lykeys.vcxproj /t:Build /p:Configuration=Debug /p:Platform=x64
+```
+
+WDK 28000 的 INF 验证需要使用上面的 **64 位 MSBuild**。
+输出文件分别位于 `lykeysdll/x64/Debug/lykeysdll.dll` 和 `lykeys/x64/Debug/lykeys.sys`；
+驱动安装包位于 `lykeys/x64/Debug/lykeys/`。构建成功不代表驱动已安装或加载。
+
 ## Python示例
 
 1. 开启 **测试模式** & **禁用强制驱动签名** 模式 & **重启**  

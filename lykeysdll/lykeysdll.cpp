@@ -9,133 +9,12 @@
 #include <algorithm>
 #include <sysinfoapi.h>
 #include <time.h>
-#include <TlHelp32.h>
 #include <cmath>
 
 // 使用std命名空间中的min和max
 using std::min;
 using std::max;
 using std::abs;
-
-// 字符串加密宏和常量
-#define XSTR_SEED (0x11223344 ^ 0xABCDEF12)  // 更复杂的种子
-#define ENCRYPT_CHAR(ch, seed) ((ch) ^ ((seed) >> 8) ^ ((seed) & 0xFF))  // 增强的加密算法
-#define DECRYPT_CHAR(ch, seed) ENCRYPT_CHAR(ch, seed)
-
-// 字符串加密类
-class XorString {
-private:
-	unsigned char* m_encryptedData;
-	size_t m_length;
-	DWORD m_seed;
-	bool m_isDecrypted;
-
-	void Encrypt() {
-		DWORD rolling_seed = m_seed;
-		for (size_t i = 0; i < m_length; i++) {
-			m_encryptedData[i] = ENCRYPT_CHAR(m_encryptedData[i], rolling_seed);
-			rolling_seed = _rotl(rolling_seed, 3) + m_encryptedData[i] + 0x37;
-		}
-		m_isDecrypted = false;
-	}
-
-public:
-	XorString(const char* data, DWORD seed = XSTR_SEED) : m_seed(seed), m_isDecrypted(false) {
-		m_length = strlen(data);
-		m_encryptedData = new unsigned char[m_length + 1];
-		memcpy(m_encryptedData, data, m_length);
-		m_encryptedData[m_length] = '\0';
-		Encrypt();
-	}
-
-	~XorString() {
-		if (m_encryptedData) {
-			if (m_isDecrypted) {
-				SecureZeroMemory(m_encryptedData, m_length);
-			}
-			delete[] m_encryptedData;
-		}
-	}
-
-	const char* Decrypt() {
-		if (!m_isDecrypted) {
-			DWORD rolling_seed = m_seed;
-			for (size_t i = 0; i < m_length; i++) {
-				unsigned char decrypted = DECRYPT_CHAR(m_encryptedData[i], rolling_seed);
-				rolling_seed = _rotl(rolling_seed, 3) + m_encryptedData[i] + 0x37;
-				m_encryptedData[i] = decrypted;
-			}
-			m_isDecrypted = true;
-		}
-		return (const char*)m_encryptedData;
-	}
-
-	void ReEncrypt() {
-		if (m_isDecrypted) {
-			Encrypt();
-		}
-	}
-};
-
-// 加密的关键字符串
-namespace EncryptedStrings {
-	static XorString g_DevicePath("\\\\.\\lykeys", XSTR_SEED ^ 0x12345678);
-	static XorString g_DriverName("lykeys", XSTR_SEED ^ 0x87654321);
-	static XorString g_NtdllName("ntdll.dll", XSTR_SEED ^ 0xABCDEF00);
-	static XorString g_Kernel32Name("kernel32.dll", XSTR_SEED ^ 0x55AA55AA);
-	static XorString g_NtQueryInfoProcess("NtQueryInformationProcess", XSTR_SEED ^ 0x11111111);
-}
-
-// 反调试检测函数
-bool IsDebuggerPresentEx() {
-	typedef NTSTATUS(NTAPI* pNtQueryInformationProcess)(
-		IN HANDLE ProcessHandle,
-		IN PROCESSINFOCLASS ProcessInformationClass,
-		OUT PVOID ProcessInformation,
-		IN ULONG ProcessInformationLength,
-		OUT PULONG ReturnLength OPTIONAL
-	);
-
-	HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-	if (!hNtdll) return false;
-
-	pNtQueryInformationProcess NtQueryInformationProcess = (pNtQueryInformationProcess)
-		GetProcAddress(hNtdll, "NtQueryInformationProcess");
-	if (!NtQueryInformationProcess) return false;
-
-	DWORD_PTR debugPort = 0;
-	NTSTATUS status = NtQueryInformationProcess(
-		GetCurrentProcess(),
-		ProcessDebugPort,
-		&debugPort,
-		sizeof(debugPort),
-		NULL
-	);
-
-	// 检查调试标志
-	BOOL isDebuggerPresent = FALSE;
-	CheckRemoteDebuggerPresent(GetCurrentProcess(), &isDebuggerPresent);
-	
-	// 检查进程名称
-	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	if (hSnapshot != INVALID_HANDLE_VALUE) {
-		PROCESSENTRY32W pe32;
-		pe32.dwSize = sizeof(pe32);
-		if (Process32FirstW(hSnapshot, &pe32)) {
-			do {
-				if (wcsstr(pe32.szExeFile, L"ollydbg.exe") ||
-					wcsstr(pe32.szExeFile, L"x64dbg.exe") ||
-					wcsstr(pe32.szExeFile, L"windbg.exe")) {
-					CloseHandle(hSnapshot);
-					return true;
-				}
-			} while (Process32NextW(hSnapshot, &pe32));
-		}
-		CloseHandle(hSnapshot);
-	}
-
-	return (NT_SUCCESS(status) && debugPort) || isDebuggerPresent;
-}
 
 typedef LONG NTSTATUS;
 typedef NTSTATUS (WINAPI *pfnRtlGetVersion)(PRTL_OSVERSIONINFOW);
@@ -400,16 +279,14 @@ BOOL SetHandle()
 		drvhandle = NULL;
 	}
 
-	const char* devicePath = EncryptedStrings::g_DevicePath.Decrypt();
-	drvhandle = CreateFileA(
-		devicePath,
+	drvhandle = CreateFile(
+		KEYMOUSE_WIN32_DEVICE_NAME,
 		GENERIC_WRITE | GENERIC_READ,
 		0,
 		NULL,
 		OPEN_EXISTING,
 		0,
 		0);
-	EncryptedStrings::g_DevicePath.ReEncrypt();
 
 	if (drvhandle == INVALID_HANDLE_VALUE || drvhandle == NULL) {
 		DWORD error = GetLastError();
@@ -822,11 +699,6 @@ BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
 	SC_HANDLE hServiceMgr = NULL;
 	SC_HANDLE hServiceDDK = NULL;
 	const DWORD START_TIMEOUT = 3000; // 启动超时时间(毫秒)
-	
-	// 使用加密的DLL名称
-	const char* ntdllName = EncryptedStrings::g_NtdllName.Decrypt();
-	HMODULE hNtdll = GetModuleHandleA(ntdllName);
-	EncryptedStrings::g_NtdllName.ReEncrypt();
 	
 	// 1. 添加权限检查
 	HANDLE hToken;
