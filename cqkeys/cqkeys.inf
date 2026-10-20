@@ -1,0 +1,77 @@
+;
+; cqkeys.inf
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=System ; 改用System类而不是Sample
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318} ; System类的GUID
+Provider=%ManufacturerName%
+CatalogFile=cqkeys.cat
+DriverVer=01/01/2024,1.0.0.1
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+cqkeys_Device_CoInstaller_CopyFiles = 11
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+cqkeys.sys  = 1,,
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$
+
+[Standard.NT$ARCH$]
+%cqkeys.DeviceDesc%=cqkeys_Device, Root\cqkeys
+
+[cqkeys_Device.NT]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+cqkeys.sys
+
+;-------------- Service installation
+[cqkeys_Device.NT.Services]
+AddService = cqkeys,%SPSVCINST_ASSOCSERVICE%, cqkeys_Service_Inst
+
+; -------------- cqkeys driver install sections
+[cqkeys_Service_Inst]
+DisplayName    = %cqkeys.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\cqkeys.sys
+
+;
+;--- cqkeys_Device Coinstaller installation ------
+;
+
+[cqkeys_Device.NT.CoInstallers]
+AddReg=cqkeys_Device_CoInstaller_AddReg
+CopyFiles=cqkeys_Device_CoInstaller_CopyFiles
+
+[cqkeys_Device_CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
+
+[cqkeys_Device_CoInstaller_CopyFiles]
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
+
+[cqkeys_Device.NT.Wdf]
+KmdfService =  cqkeys, cqkeys_wdfsect
+[cqkeys_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+ManufacturerName="CQDLL"
+DiskName = "CQDLL Installation Disk"
+cqkeys.DeviceDesc = "CQDLL Keyboard Mouse Driver"
+cqkeys.SVCDESC = "CQDLL Keyboard Mouse Service"

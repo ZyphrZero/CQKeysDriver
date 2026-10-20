@@ -16,17 +16,17 @@ class SimpleInputTester:
         # 设置默认路径
         if not dll_path or not sys_path:
             base_dir = os.path.dirname(os.path.dirname(__file__))
-            self.dll_path = dll_path or os.path.join(base_dir, 'lykeysdll', 'x64', 'Debug', 'lykeysdll.dll')
-            self.sys_path = sys_path or os.path.join(base_dir, 'lykeys', 'x64', 'Debug', 'lykeys', 'lykeys.sys')
+            self.dll_path = dll_path or os.path.join(base_dir, 'cqkeysdll', 'x64', 'Debug', 'cqkeysdll.dll')
+            self.sys_path = sys_path or os.path.join(base_dir, 'cqkeys', 'x64', 'Debug', 'cqkeys', 'cqkeys.sys')
 
         # 加载驱动
         self.driver = CDLL(self.dll_path)
         
         # 先尝试卸载已存在的驱动
-        self.driver.UnloadNTDriver(b'lykeys')
+        self.driver.UnloadNTDriver(b'cqkeys')
         
         # 加载驱动
-        if not self.driver.LoadNTDriver(b'lykeys', self.sys_path.encode()):
+        if not self.driver.LoadNTDriver(b'cqkeys', self.sys_path.encode()):
             raise RuntimeError("驱动加载失败")
         
         # 设置句柄
@@ -35,7 +35,7 @@ class SimpleInputTester:
     def cleanup(self):
         """清理驱动"""
         if self.driver:
-            self.driver.UnloadNTDriver(b'lykeys')
+            self.driver.UnloadNTDriver(b'cqkeys')
 
     def press_key(self, key):
         """按下并释放按键"""

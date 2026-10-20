@@ -1,4 +1,7 @@
-# LingYaoDriver
+# cqkeydriver
+
+驱动服务名和设备名为 `cqkeys`，动态库为 `cqkeysdll.dll`；
+C# 管理器项目为 `CqKeys`，Python 测试工具位于 `cqkeyspy_test/`。
 
 ## 本地构建
 
@@ -10,13 +13,17 @@
 
 ```powershell
 $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find 'MSBuild\**\Bin\amd64\MSBuild.exe' | Select-Object -First 1
-& $msbuild .\lykeysdll\lykeysdll.vcxproj /t:Build /p:Configuration=Debug /p:Platform=x64
-& $msbuild .\lykeys\lykeys.vcxproj /t:Build /p:Configuration=Debug /p:Platform=x64
+& $msbuild .\cqkeysdll\cqkeysdll.vcxproj /t:Build /p:Configuration=Debug /p:Platform=x64
+& $msbuild .\cqkeys\cqkeys.vcxproj /t:Build /p:Configuration=Debug /p:Platform=x64
 ```
 
 WDK 28000 的 INF 验证需要使用上面的 **64 位 MSBuild**。
-输出文件分别位于 `lykeysdll/x64/Debug/lykeysdll.dll` 和 `lykeys/x64/Debug/lykeys.sys`；
-驱动安装包位于 `lykeys/x64/Debug/lykeys/`。构建成功不代表驱动已安装或加载。
+输出文件分别位于 `cqkeysdll/x64/Debug/cqkeysdll.dll` 和 `cqkeys/x64/Debug/cqkeys.sys`；
+驱动安装包位于 `cqkeys/x64/Debug/cqkeys/`。构建成功不代表驱动已安装或加载。
+
+`cqkeyspy_test/cqkeysdll/` 中附带与当前源码名称一致的 x64 Debug DLL、
+测试签名驱动及其目录文件。更新驱动时，应将同一次构建生成的 `.sys` 和 `.cat` 一起替换。
+测试证书不会自动受到系统信任，驱动加载仍需在配置好测试证书信任的测试环境中验证。
 
 ## Python示例
 

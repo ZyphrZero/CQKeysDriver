@@ -1,0 +1,53 @@
+﻿<Window x:Class="CqKeys.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:CqKeys"
+        mc:Ignorable="d"
+        Title="CqKeys 驱动管理器" Height="450" Width="800"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="CqKeys 驱动管理器"
+                   FontSize="24" 
+                   FontWeight="Bold" 
+                   Margin="0,0,0,10"/>
+
+        <TextBlock Grid.Row="1" 
+                   x:Name="DriverPathText"
+                   Text="驱动路径: "
+                   Margin="0,0,0,10"
+                   TextWrapping="Wrap"/>
+
+        <ScrollViewer Grid.Row="2" 
+                      Margin="0,0,0,20">
+            <TextBox x:Name="LogTextBox" 
+                     IsReadOnly="True"
+                     TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto"/>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="3" 
+                    Orientation="Horizontal" 
+                    HorizontalAlignment="Right">
+            <Button x:Name="InstallButton"
+                    Content="安装驱动"
+                    Width="100"
+                    Height="30"
+                    Margin="0,0,10,0"
+                    Click="InstallButton_Click"/>
+            <Button x:Name="UninstallButton"
+                    Content="卸载驱动"
+                    Width="100"
+                    Height="30"
+                    Click="UninstallButton_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
