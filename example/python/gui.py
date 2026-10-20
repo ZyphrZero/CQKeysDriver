@@ -4,7 +4,11 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
-from driver_manager import DriverManager, DEFAULT_DLL_PATH
+from driver_manager import DriverManager, DEFAULT_DLL_PATH, load_library
+from driver_setup import (
+    describe_connection_error, find_driver_files, install_driver,
+    query_device_status, validate_package,
+)
 from input_tester import InputTester
 from virtuakeys_mapping import VirtualKeys
 import logging
@@ -14,6 +18,9 @@ import sys
 import ctypes
 from ctypes import wintypes
 import argparse
+from pathlib import Path
+import queue
+# pywin32
 import win32gui
 import win32api
 import win32con
@@ -30,14 +37,7 @@ class MONITORINFO(ctypes.Structure):
         ("dwFlags", wintypes.DWORD)
     ]
 
-# 添加命令行参数解析
-# python gui.py --debug
-parser = argparse.ArgumentParser()
-parser.add_argument('--debug', action='store_true', help='启用调试模式')
-args = parser.parse_args()
-
-# 使用命令行参数设置调试模式
-DEBUG_MODE = args.debug
+DEBUG_MODE = False
 
 # 在类外部或文件开头定义常量
 SW_HIDE = 0
@@ -63,10 +63,15 @@ class CQKeysGUI:
         self.input_tester = None
         self.is_connected = False
         self.is_closing = False
+        self._driver_busy = False
+        self._driver_action = ""
+        self._driver_results = queue.Queue()
         self.config_file = os.path.join(os.path.dirname(__file__), "driver_config.json")
         
         # 路径配置变量（在创建根窗口后创建）
         self.dll_path_var = tk.StringVar(value=str(DEFAULT_DLL_PATH))
+        self.inf_path_var = tk.StringVar()
+        self.setup_path_var = tk.StringVar()
         
         # 测试相关变量
         self.test_key_var = tk.StringVar(value="a")
@@ -120,6 +125,7 @@ class CQKeysGUI:
         
         # 加载配置
         self.load_path_config()
+        self._suggest_driver_files(keep_existing=True)
         self.load_auto_move_config()
         
         # 如果没有配置路径，显示提示消息
@@ -131,19 +137,25 @@ class CQKeysGUI:
         self.create_input_test_tab()
         self.create_rapid_test_tab()
         self.create_mouse_test_tab()
+        self._update_button_states(False)
         
         # 绑定事件
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+        self._initial_status_check = self.root.after(100, self._check_driver_status)
         
     def create_driver_tab(self):
         """创建驱动控制标签页"""
         driver_tab = ttk.Frame(self.notebook)
         self.notebook.add(driver_tab, text="驱动控制")
 
-        # 驱动控制区域
+        self.create_path_frame(driver_tab)
+
+        # 安装与连接是独立动作；已连接时禁止更换驱动包。
         driver_frame = ttk.LabelFrame(driver_tab, text="驱动控制", padding="5")
         driver_frame.pack(fill=tk.X, padx=5, pady=5)
-        
+        self.install_btn = ttk.Button(driver_frame, text="安装并连接", command=self._install_and_connect)
+        self.install_btn.pack(side=tk.LEFT, padx=5)
+
         self.load_btn = ttk.Button(driver_frame, text="连接设备", command=self._connect_device)
         self.load_btn.pack(side=tk.LEFT, padx=5)
         
@@ -154,20 +166,29 @@ class CQKeysGUI:
         status_frame = ttk.LabelFrame(driver_tab, text="驱动状态", padding="5")
         status_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        self.driver_status = ttk.Label(status_frame, text="驱动状态: 未知")
+        self.device_status = ttk.Label(status_frame, text="设备状态：正在检查", wraplength=360)
+        self.device_status.pack(fill=tk.X, padx=5, pady=2)
+        self.driver_status = ttk.Label(status_frame, text="连接状态：未连接", wraplength=360)
         self.driver_status.pack(fill=tk.X, padx=5, pady=2)
         
         self.last_check = ttk.Label(status_frame, text="上次检查: 未检查")
         self.last_check.pack(fill=tk.X, padx=5, pady=2)
         
-        self.check_status_btn = ttk.Button(status_frame, text="检查驱动状态", 
+        self.check_status_btn = ttk.Button(status_frame, text="刷新设备状态",
                                        command=self._check_driver_status, 
-                                       state=tk.DISABLED,
                                        width=15)
         self.check_status_btn.pack(side=tk.LEFT, padx=5, pady=2)
 
-        # 路径配置区域
-        self.create_path_frame(driver_tab)
+        self.driver_progress = ttk.Progressbar(status_frame, mode="indeterminate")
+        self.driver_progress.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(
+            driver_tab,
+            text="首次使用：选择配套 DLL、INF 和安装工具，然后点击“安装并连接”。\n"
+                 "已安装设备：直接连接。断开连接不会卸载驱动。\n"
+                 "自签名包需要目标系统支持测试签名；程序不会自动修改启动设置或导入证书。",
+            wraplength=360, justify=tk.LEFT,
+        ).pack(fill=tk.X, padx=10, pady=5)
 
     def create_input_test_tab(self):
         """创建输入测试标签页"""
@@ -544,7 +565,11 @@ class CQKeysGUI:
 
     def _on_closing(self):
         """处理窗口关闭事件"""
+        if self._driver_busy:
+            messagebox.showinfo("操作进行中", f"正在{self._driver_action}，请等待完成后关闭窗口。")
+            return
         self.is_closing = True
+        self.rapid_test_running = False
         
         # 停止键盘钩子
         if self.keyboard_hook:
@@ -558,26 +583,24 @@ class CQKeysGUI:
                 self.driver_mgr.disconnect()
             except Exception as e:
                 print(f"清理驱动时出错: {str(e)}")  # 使用print而不是logging
+        logging.getLogger().removeHandler(self._log_handler)
+        self.root.after_cancel(self._log_poll)
+        self.root.after_cancel(self._initial_status_check)
         self.root.destroy()
     
     def _setup_logging(self):
         """设置日志处理"""
+        self._log_messages = queue.Queue()
+
         class TextHandler(logging.Handler):
-            def __init__(self, text_widget, gui):
+            def __init__(self, gui):
                 logging.Handler.__init__(self)
-                self.text_widget = text_widget
                 self.gui = gui
                 
             def emit(self, record):
                 if not self.gui.is_closing:  # 只在程序未关闭时输出日志
                     msg = self.format(record) + '\n'
-                    # 使用after方法确保在主线程中更新UI
-                    self.gui.root.after(0, self._insert_log, msg)
-            
-            def _insert_log(self, msg):
-                """在主线程中插入日志并滚动"""
-                self.text_widget.insert(tk.END, msg)
-                self.text_widget.yview_moveto(1.0)  # 确保滚动到底部
+                    self.gui._log_messages.put(msg)
         
         # 创建日志区域（放在右侧面板）
         self.log_frame = ttk.LabelFrame(self.right_panel, text="日志输出")
@@ -600,15 +623,23 @@ class CQKeysGUI:
         self.log_scrollbar.grid(row=0, column=1, sticky="ns", pady=5)
         
         # 配置日志处理
-        handler = TextHandler(self.log_text, self)
+        handler = TextHandler(self)
+        self._log_handler = handler
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         logging.getLogger().addHandler(handler)
         logging.getLogger().setLevel(logging.INFO)
+        self._log_poll = self.root.after(50, self._drain_logs)
+
+    def _drain_logs(self):
+        while not self._log_messages.empty():
+            self.log_text.insert(tk.END, self._log_messages.get_nowait())
+            self.log_text.yview_moveto(1.0)
+        self._log_poll = self.root.after(50, self._drain_logs)
     
     def _update_button_states(self, connected):
         """更新按钮状态"""
-        state = tk.NORMAL if connected else tk.DISABLED
+        state = tk.NORMAL if connected and not self._driver_busy else tk.DISABLED
         self.unload_btn.config(state=state)
         self.test_key_btn.config(state=state)
         self.test_input_btn.config(state=state)
@@ -616,36 +647,109 @@ class CQKeysGUI:
         self.submit_btn.config(state=state)
         self.clear_btn.config(state=state)
         self.input_entry.config(state=state)
-        self.check_status_btn.config(state=state)
-        self.load_btn.config(state=tk.DISABLED if connected else tk.NORMAL)
+        self.check_status_btn.config(state=tk.DISABLED if self._driver_busy else tk.NORMAL)
+        editable = tk.DISABLED if connected or self._driver_busy else tk.NORMAL
+        self.load_btn.config(state=editable)
+        self.install_btn.config(state=editable)
+        for widget in self.path_controls:
+            widget.config(state=editable)
         self.rapid_test_btn.config(state=state)
-    
-    def _connect_device(self):
-        """加载驱动"""
-        try:
-            # 获取当前设置的路径
-            dll_path = self.dll_path_var.get()
-            
-            # 检查路径是否已配置
-            if not dll_path:
-                messagebox.showerror("错误", "请先配置新构建的 DLL 路径")
+
+    def _run_driver_task(self, action, work, completed):
+        """Workers never touch Tk; the main thread polls one serialized operation."""
+        if self._driver_busy or self.is_closing:
+            return
+        self._driver_busy = True
+        self._driver_action = action
+        self._update_button_states(self.is_connected)
+        self.driver_status.config(text=f"正在{action}…")
+        self.driver_progress.start(12)
+
+        def run():
+            try:
+                self._driver_results.put((work(), None))
+            except Exception as error:
+                self._driver_results.put((None, error))
+
+        def poll():
+            try:
+                result, error = self._driver_results.get_nowait()
+            except queue.Empty:
+                self.root.after(50, poll)
                 return
-            
-            self.driver_mgr = DriverManager(dll_path)
-            
-            if self.driver_mgr.connect():
-                self.input_tester = InputTester(self.driver_mgr.get_driver())
-                self.is_connected = True
-                self._update_button_states(True)
-                self._check_driver_status()  # 初始检查驱动状态
-            else:
-                messagebox.showerror("错误", "驱动加载失败")
-        except Exception as e:
-            messagebox.showerror("错误", f"驱动加载出错: {str(e)}")
-            logging.error(f"驱动加载出错: {str(e)}")
+            self._driver_busy = False
+            self.driver_progress.stop()
+            self._update_button_states(self.is_connected)
+            completed(result, error)
+
+        threading.Thread(target=run, daemon=True).start()
+        self.root.after(50, poll)
+
+    def _connect_device(self):
+        self._start_connection(install=False)
+
+    def _install_and_connect(self):
+        self._start_connection(install=True)
+
+    def _start_connection(self, install):
+        if self.is_connected or self._driver_busy:
+            return
+        dll_path = self.dll_path_var.get().strip()
+        inf_path = self.inf_path_var.get().strip()
+        setup_path = self.setup_path_var.get().strip()
+        if not dll_path:
+            messagebox.showerror("请选择 DLL", "请选择当前构建的 cqkeysdll.dll。")
+            return
+
+        def work():
+            manager = DriverManager(dll_path)
+            # Reject an old DLL or wrong architecture before making installation changes.
+            load_library(manager.dll_path)
+            installed = install_driver(inf_path, setup_path) if install else None
+            if installed:
+                logging.info("安装工具输出：\n%s", installed.output.strip())
+            if installed and installed.reboot_required:
+                return None, None, installed
+            device = query_device_status()
+            if not manager.connect():
+                detail = describe_connection_error(manager.last_error)
+                prefix = "安装工具已完成，但设备连接失败。\n" if installed else ""
+                output = f"\n\n安装输出：\n{installed.output}" if installed else ""
+                raise RuntimeError(f"{prefix}{detail}\n\n{device.text}{output}")
+            return manager, device, installed
+
+        def completed(result, error):
+            if error:
+                detail = describe_connection_error(error)
+                logging.error("%s", detail)
+                self.driver_status.config(text="连接状态：未连接，操作失败")
+                messagebox.showerror("安装或连接失败" if install else "连接失败", detail)
+                self._check_driver_status()
+                return
+            manager, device, installed = result
+            if installed and installed.reboot_required:
+                self.device_status.config(text="设备状态：安装已完成，重启后确认启动状态")
+                self.driver_status.config(text="连接状态：等待重启，尚未连接")
+                messagebox.showinfo("需要重启", "驱动安装返回 3010：请重启 Windows 后重新打开 GUI 并连接设备。")
+                return
+            self.device_status.config(text=f"设备状态：{device.text}")
+            self.driver_mgr = manager
+            self.input_tester = InputTester(manager.get_driver())
+            self.is_connected = True
+            self.driver_status.config(text="连接状态：已连接，协议检查通过")
+            self._update_button_states(True)
+            self._show_last_check(manager.get_driver().GetLastCheckTime())
+
+        action = "安装驱动并连接设备" if install else "连接设备"
+        self._run_driver_task(action, work, completed)
     
     def _disconnect_device(self):
-        """卸载驱动"""
+        """关闭客户端句柄，保留已安装的 PnP 设备。"""
+        if self._driver_busy:
+            return
+        if getattr(self, "rapid_test_running", False) or self.auto_move_running:
+            messagebox.showinfo("测试正在运行", "请先停止高频按键测试和自动移动，再断开设备。")
+            return
         try:
             if self.driver_mgr:
                 self.driver_mgr.disconnect()
@@ -653,10 +757,10 @@ class CQKeysGUI:
                 self.input_tester = None
                 self.is_connected = False
                 self._update_button_states(False)
-                self.driver_status.config(text="驱动状态: 未加载")
+                self.driver_status.config(text="连接状态：已断开，驱动仍保持安装")
                 self.last_check.config(text="上次检查: 未检查")
         except Exception as e:
-            messagebox.showerror("错误", f"驱动卸载出错: {str(e)}")
+            messagebox.showerror("断开失败", describe_connection_error(e))
     
     def _test_keyboard(self):
         """测试键盘"""
@@ -905,41 +1009,52 @@ class CQKeysGUI:
     def _get_status_text(self, status):
         """获取状态文本"""
         status_map = {
-            0: "未知",
-            1: "正常",
-            2: "错误"
+            0: "未连接",
+            1: "已就绪",
+            2: "错误",
+            5: "连接失败",
         }
         return status_map.get(status, "未知")
     
     def _check_driver_status(self):
-        """检查驱动状态"""
-        if not self.input_tester:
+        """即使未连接 DLL，也能检查 PnP 设备是否安装和启动。"""
+        if self._driver_busy or self.is_closing:
             return
-            
-        def check():
-            try:
-                logging.info("开始检查驱动状态")
-                self.input_tester.check_device_status()
-                
-                # 获取状态
-                driver_status = self.input_tester.get_driver_status()
-                last_check = self.input_tester.get_last_check_time()
-                
-                # 更新显示
-                self.root.after(0, lambda: self.driver_status.config(
-                    text=f"驱动状态: {self._get_status_text(driver_status)}"))
-                
-                # 格式化时间（DLL返回的是Unix时间戳，毫秒为单位）
-                if last_check > 0:
-                    time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_check/1000))
-                    self.root.after(0, lambda: self.last_check.config(
-                        text=f"上次检查: {time_str}"))
-                
-                logging.info(f"驱动状态: {self._get_status_text(driver_status)}")
-            except Exception as e:
-                logging.error(f"检查驱动状态出错: {str(e)}")
-        
-        threading.Thread(target=check, daemon=True).start()
+        manager = self.driver_mgr
+
+        def work():
+            device = query_device_status()
+            if manager and manager.get_driver():
+                driver = manager.get_driver()
+                try:
+                    driver.CheckDeviceStatus()
+                except OSError as error:
+                    return device, driver.GetDriverStatus(), driver.GetLastCheckTime(), error
+                return device, driver.GetDriverStatus(), driver.GetLastCheckTime(), None
+            return device, 0, time.time() * 1000, None
+
+        def completed(result, error):
+            if error:
+                self.device_status.config(text=f"设备状态：查询失败，{error}")
+                self.driver_status.config(text="连接状态：状态查询失败，请重试")
+                logging.error("设备状态查询失败：%s", error)
+                return
+            device, status, checked_at, connection_error = result
+            self.device_status.config(text=f"设备状态：{device.text}")
+            self.driver_status.config(text=f"连接状态：{self._get_status_text(status)}")
+            self._show_last_check(checked_at)
+            logging.info("%s；连接状态：%s", device.text, self._get_status_text(status))
+            if connection_error:
+                detail = describe_connection_error(connection_error)
+                self.driver_status.config(text="连接状态：通信失败，请断开后重新连接")
+                logging.error("%s", detail)
+
+        self._run_driver_task("检查设备状态", work, completed)
+
+    def _show_last_check(self, milliseconds):
+        if milliseconds > 0:
+            checked_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(milliseconds / 1000))
+            self.last_check.config(text=f"上次检查：{checked_at}")
     
     def create_path_frame(self, parent=None):
         """创建路径配置区域
@@ -951,24 +1066,78 @@ class CQKeysGUI:
         if parent is None:
             parent = self.left_panel
             
-        path_frame = ttk.LabelFrame(parent, text="驱动路径配置", padding="5")
+        path_frame = ttk.LabelFrame(parent, text="驱动文件", padding="5")
         path_frame.pack(fill="x", padx=5, pady=5)
-        
-        # DLL路径配置
-        ttk.Label(path_frame, text="DLL路径:").grid(row=0, column=0, sticky="w")
-        # 使用已经在__init__中创建的StringVar
-        self.dll_path_entry = ttk.Entry(path_frame, textvariable=self.dll_path_var, width=30, font=self.default_font)
-        self.dll_path_entry.grid(row=0, column=1, padx=5)
-        ttk.Button(path_frame, text="浏览", command=self.browse_file).grid(row=0, column=2)
-        
-        # 保存配置按钮
-        ttk.Button(path_frame, text="保存配置", command=self.save_path_config).grid(row=1, column=1, pady=5)
-    
+        path_frame.columnconfigure(1, weight=1)
+        self.path_controls = []
+        rows = (
+            ("客户端 DLL", self.dll_path_var, self.browse_file),
+            ("驱动 INF", self.inf_path_var, self._browse_inf),
+            ("安装工具", self.setup_path_var, self._browse_setup),
+        )
+        for row, (label, variable, browse) in enumerate(rows):
+            ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w")
+            entry = ttk.Entry(path_frame, textvariable=variable, width=26)
+            entry.grid(row=row, column=1, sticky="ew", padx=5, pady=3)
+            button = ttk.Button(path_frame, text="浏览", command=browse, width=6)
+            button.grid(row=row, column=2)
+            self.path_controls.extend((entry, button))
+        actions = ttk.Frame(path_frame)
+        actions.grid(row=3, column=0, columnspan=3, sticky="w", pady=5)
+        for label, command in (
+            ("选择发布包目录", self._browse_package),
+            ("查找配套文件", self._suggest_driver_files),
+            ("保存配置", self.save_path_config),
+        ):
+            button = ttk.Button(actions, text=label, command=command)
+            button.pack(side=tk.LEFT, padx=3)
+            self.path_controls.append(button)
+
+    def _suggest_driver_files(self, keep_existing=False):
+        dll = self.dll_path_var.get().strip()
+        if not dll:
+            return
+        inf, setup = find_driver_files(dll)
+        for variable, path in ((self.inf_path_var, inf), (self.setup_path_var, setup)):
+            if not keep_existing or not variable.get():
+                variable.set(str(path) if path else "")
+
     def browse_file(self):
         """选择客户端 DLL。"""
         filename = filedialog.askopenfilename(filetypes=[("DLL files", "*.dll")])
         if filename:
             self.dll_path_var.set(filename)
+            self._suggest_driver_files()
+
+    def _browse_inf(self):
+        filename = filedialog.askopenfilename(filetypes=[("驱动 INF", "*.inf")])
+        if filename:
+            self.inf_path_var.set(filename)
+            setup = Path(filename).parent / "device_setup.exe"
+            if setup.is_file():
+                self.setup_path_var.set(str(setup))
+
+    def _browse_setup(self):
+        filename = filedialog.askopenfilename(filetypes=[("安装工具", "device_setup.exe")])
+        if filename:
+            self.setup_path_var.set(filename)
+
+    def _browse_package(self):
+        directory = filedialog.askdirectory(title="选择已解压的 CQKeys 发布包目录")
+        if not directory:
+            return
+        folder = Path(directory)
+        try:
+            validate_package(folder / "cqkeys.inf", folder / "device_setup.exe")
+            dll = folder / "cqkeysdll.dll"
+            if not dll.is_file():
+                raise FileNotFoundError(f"找不到客户端 DLL：{dll}")
+        except (OSError, ValueError) as error:
+            messagebox.showerror("发布包不完整", str(error))
+            return
+        self.dll_path_var.set(str(dll))
+        self.inf_path_var.set(str(folder / "cqkeys.inf"))
+        self.setup_path_var.set(str(folder / "device_setup.exe"))
     
     def save_path_config(self):
         """保存路径配置到文件"""
@@ -980,28 +1149,34 @@ class CQKeysGUI:
             logging.error("DLL路径不能为空")
             return
             
-        config = {
-            # 驱动路径配置
-            "dll_path": dll_path,
-            
-            # 高频按键测试配置
-            "rapid_test": {
-                "test_key": self.test_key_var.get(),
-                "press_time": self.press_time_var.get(),
-                "interval_time": self.interval_time_var.get(),
-                "duration": self.duration_var.get()
-            }
-        }
-        
         try:
-            with open(self.config_file, "w") as f:
-                json.dump(config, f, indent=4)
+            self._save_configuration()
             logging.info("配置保存成功")
         except Exception as e:
             error_msg = f"保存配置失败: {str(e)}"
             logging.error(error_msg)
             messagebox.showerror("错误", error_msg)
-    
+
+    def _save_configuration(self):
+        config = {}
+        if os.path.exists(self.config_file):
+            with open(self.config_file, "r") as file:
+                config = json.load(file)
+        config.update({
+            "dll_path": self.dll_path_var.get().strip(),
+            "inf_path": self.inf_path_var.get().strip(),
+            "setup_path": self.setup_path_var.get().strip(),
+            "rapid_test": {
+                "test_key": self.test_key_var.get(),
+                "press_time": self.press_time_var.get(),
+                "interval_time": self.interval_time_var.get(),
+                "duration": self.duration_var.get(),
+            },
+            "auto_move": self.auto_move_config,
+        })
+        with open(self.config_file, "w") as file:
+            json.dump(config, file, indent=4)
+
     def load_path_config(self):
         """加载保存的路径配置"""
         try:
@@ -1015,7 +1190,8 @@ class CQKeysGUI:
                 # 设置路径变量
                 if dll_path:
                     self.dll_path_var.set(dll_path)
-                    
+                self.inf_path_var.set(config.get("inf_path", ""))
+                self.setup_path_var.set(config.get("setup_path", ""))
                 
                 # 加载高频按键测试配置
                 rapid_test_config = config.get("rapid_test", {})
@@ -1028,29 +1204,6 @@ class CQKeysGUI:
                     
         except Exception as e:
             logging.error(f"加载配置失败: {str(e)}")
-    
-    def initialize_driver(self):
-        """初始化驱动"""
-        try:
-            dll_path = self.dll_path_var.get()
-            
-            if not dll_path:
-                logging.error("请先设置新构建的 DLL 文件路径！")
-                return False
-            
-            self.driver_mgr = DriverManager(dll_path)
-            
-            if self.driver_mgr.connect():
-                self.input_tester = InputTester(self.driver_mgr.get_driver())
-                logging.info("驱动初始化成功！")
-                return True
-            else:
-                messagebox.showerror("错误", "驱动初始化失败！")
-                return False
-                
-        except Exception as e:
-            messagebox.showerror("错误", f"驱动初始化失败: {str(e)}")
-            return False
     
     def run(self):
         """运行GUI"""
@@ -1715,20 +1868,7 @@ class CQKeysGUI:
                 'range': float(self.range_var.get())
             })
             
-            # 保存到文件
-            config = {
-                'dll_path': self.dll_path_var.get(),
-                'rapid_test': {
-                    'test_key': self.test_key_var.get(),
-                    'press_time': self.press_time_var.get(),
-                    'interval_time': self.interval_time_var.get(),
-                    'duration': self.duration_var.get()
-                },
-                'auto_move': self.auto_move_config
-            }
-            
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=4)
+            self._save_configuration()
                 
             messagebox.showinfo("成功", "配置保存成功！")
             
@@ -1750,6 +1890,9 @@ class CQKeysGUI:
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--debug', action='store_true', help='启用调试模式')
+    DEBUG_MODE = parser.parse_args().debug
     try:
         app = CQKeysGUI()
         app.run()

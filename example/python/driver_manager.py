@@ -3,13 +3,19 @@ import ctypes
 import logging
 from pathlib import Path
 
-DEFAULT_DLL_PATH = Path(__file__).resolve().parents[2] / "cqkeysdll/x64/Debug/cqkeysdll.dll"
+_ROOT = Path(__file__).resolve().parents[2]
+_DLL_CANDIDATES = (
+    Path(__file__).resolve().parent / "cqkeysdll.dll",
+    _ROOT / "cqkeysdll/x64/Release/cqkeysdll.dll",
+    _ROOT / "cqkeysdll/x64/Debug/cqkeysdll.dll",
+)
+DEFAULT_DLL_PATH = next((path for path in _DLL_CANDIDATES if path.is_file()), _DLL_CANDIDATES[1])
 
 
 def _check_input_result(result, function, arguments):
     if not result:
         error = ctypes.get_last_error()
-        raise OSError(error, f"{function.__name__} 失败")
+        raise OSError(error, f"{function.__name__} 失败：{ctypes.FormatError(error).strip()}")
     return result
 
 
@@ -56,8 +62,10 @@ class DriverManager:
         if not self.dll_path.is_file():
             raise FileNotFoundError(f"找不到 DLL: {self.dll_path}")
         self.driver = None
+        self.last_error = None
 
     def connect(self):
+        self.last_error = None
         try:
             if self.driver is None:
                 candidate = load_library(self.dll_path)
@@ -68,6 +76,7 @@ class DriverManager:
             logging.info("设备已连接")
             return True
         except (OSError, AttributeError, RuntimeError) as error:
+            self.last_error = error
             logging.error("连接失败: %s", error)
             return False
 
