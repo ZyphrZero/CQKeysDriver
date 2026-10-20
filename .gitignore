@@ -1,3 +1,6 @@
+.codegraph/
+.venv/
+
 # Prerequisites
 __pycache__/
 *.pyc
