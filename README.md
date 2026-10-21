@@ -18,8 +18,8 @@ cqkeys/       KMDF/VHF 驱动和 INF
 cqkeysdll/    客户端 DLL
 shared/       固定大小的 IOCTL 协议
 tools/        PnP 安装工具
-tests/        回归测试和设备接口检查
-example/      Python、C# 调用示例
+tests/        原生回归测试
+example/      C# 调用示例
 ```
 
 ## 构建
@@ -69,7 +69,7 @@ INF 在虚拟设备上配置 `vhf` 下层过滤器。安装失败时，工具尝
 
 ## 客户端
 
-[调用示例](example/README.md) 包括 Python 文本输入、图形操作界面和 C# 设备连接示例。
+[调用示例](example/README.md) 包括 C# 设备连接示例。
 DLL 声明见 [cqkeys.h](cqkeysdll/cqkeys.h)，底层协议见
 [cqkeys_protocol.h](shared/cqkeys_protocol.h)。
 
@@ -105,23 +105,11 @@ VHF 失败、设备移除或消费端停止读报告时，不能保证释放报�
 
 ```powershell
 powershell -NoProfile -File .\tests\run.ps1
-python .\tests\dll_contract_test.py
 ```
 
 原生测试运行实际输入转换和有界队列代码，启用 AddressSanitizer。
-DLL 测试只验证接口和失败路径，不打开设备。
 
-在已安装签名驱动的隔离 VM 中运行：
-
-```powershell
-# 管理员终端，关闭其他客户端
-python .\tests\device_contract_test.py
-# 普通用户终端
-python .\tests\device_contract_test.py --expect-denied
-```
-
-设备接口测试不发送有效的非零键鼠输入；关闭连接会生成全释放报告。
-运行时还需检查 HID 枚举、输入及释放、队列背压、持续输入下的设备移除、
+运行时验证需在已安装签名驱动的隔离 VM 中检查 HID 枚举、输入及释放、队列背压、持续输入下的设备移除、
 睡眠恢复和重复安装卸载，并使用 Driver Verifier 检查内存池、I/O、锁和 WDF 行为。
 编译和静态测试不能替代这些验证。
 
