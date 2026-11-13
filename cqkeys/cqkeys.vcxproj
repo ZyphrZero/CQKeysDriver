@@ -31,8 +31,6 @@
     <KMDF_VERSION_MINOR>15</KMDF_VERSION_MINOR>
     <SpectreMitigation>false</SpectreMitigation>
     <TimeStampServer />
-    <StampInf>false</StampInf>
-    <UseAutomaticDriverVerDate>false</UseAutomaticDriverVerDate>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <TargetVersion>Windows10</TargetVersion>
@@ -46,7 +44,6 @@
   </PropertyGroup>
   <PropertyGroup>
     <TimeStampServer />
-    <UseAutomaticDriverVerDate>false</UseAutomaticDriverVerDate>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -74,7 +71,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <Inf Include="cqkeys.inf" />
+    <Inf Include="cqkeys.inf">
+      <SpecifyDriverVerDirectiveDate>false</SpecifyDriverVerDirectiveDate>
+      <SpecifyDriverVerDirectiveVersion>false</SpecifyDriverVerDirectiveVersion>
+    </Inf>
   </ItemGroup>
   <ItemDefinitionGroup>
     <DriverSign>
