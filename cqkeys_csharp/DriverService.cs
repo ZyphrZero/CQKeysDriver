@@ -20,7 +20,7 @@ namespace CqKeys
             _driverName = "cqkeys";
             
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string projectDir = Path.GetFullPath(Path.Combine(baseDir, @"..\..\"));
+            string projectDir = baseDir;
             
             _driverPath = Path.Combine(
                 projectDir,
@@ -29,8 +29,7 @@ namespace CqKeys
             );
             
             string dllPath = Path.Combine(
-                projectDir,
-                "dll",
+                baseDir,
                 "cqkeysdll.dll"
             );
 
@@ -48,6 +47,7 @@ namespace CqKeys
         }
 
         public bool IsDriverInstalled => _isDriverInstalled;
+        public bool NeedsCleanup => _driverManager.NeedsCleanup;
         
         public string DriverPath => _driverPath;
 
@@ -82,7 +82,7 @@ namespace CqKeys
         {
             try
             {
-                if (!_isDriverInstalled)
+                if (!NeedsCleanup)
                 {
                     OnStatusChanged("驱动未安装");
                     return;

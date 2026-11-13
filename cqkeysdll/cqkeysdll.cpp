@@ -10,23 +10,10 @@
 #include <sysinfoapi.h>
 #include <time.h>
 #include <cmath>
-
-// 使用std命名空间中的min和max
-using std::min;
-using std::max;
-using std::abs;
-
-typedef LONG NTSTATUS;
-typedef NTSTATUS (WINAPI *pfnRtlGetVersion)(PRTL_OSVERSIONINFOW);
-
-// 系统版本信息结构
-typedef struct _DLL_SYSTEM_INFO {
-	DWORD MajorVersion; // 主版本号
-	DWORD MinorVersion; // 次版本号
-	DWORD BuildNumber; // 构建号
-	BOOL Is64BitOS; // 用于区分系统是32位还是64位
-	BOOL Is64BitProcess; // 用于区分进程是32位还是64位
-} DLL_SYSTEM_INFO, *PDLL_SYSTEM_INFO;
+#include <mutex>
+#include <array>
+#include <vector>
+#include <string>
 
 // 设备状态枚举扩展
 typedef enum _DEVICE_STATUS {
@@ -74,93 +61,98 @@ __forceinline ULONGLONG GetSystemTimeMs() {
 	return (uli.QuadPart - EPOCH_DIFFERENCE) / 10000;
 }
 
-// 获取系统信息
-BOOL GetSystemInfo(PDLL_SYSTEM_INFO pSysInfo) 
-{
-	SYSTEM_INFO si;
-	GetNativeSystemInfo(&si);
-	
-	OSVERSIONINFOEXW osvi = { sizeof(osvi) };
-	HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
-	if (!hNtdll) return FALSE;
-	
-	pfnRtlGetVersion RtlGetVersion = (pfnRtlGetVersion)GetProcAddress(hNtdll, "RtlGetVersion");
-	if (!RtlGetVersion) return FALSE;
-	
-	RtlGetVersion((PRTL_OSVERSIONINFOW)&osvi);
-	
-	pSysInfo->MajorVersion = osvi.dwMajorVersion;
-	pSysInfo->MinorVersion = osvi.dwMinorVersion;
-	pSysInfo->BuildNumber = osvi.dwBuildNumber;
-	
-	// 检查是否64位操作系统
-	typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS) (HANDLE, PBOOL);
-	LPFN_ISWOW64PROCESS fnIsWow64Process = (LPFN_ISWOW64PROCESS)
-		GetProcAddress(GetModuleHandle(TEXT("kernel32")), "IsWow64Process");
-	
-	if (fnIsWow64Process) {
-		BOOL bIsWow64 = FALSE;
-		if (fnIsWow64Process(GetCurrentProcess(), &bIsWow64)) {
-			pSysInfo->Is64BitOS = (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) || bIsWow64;
-		}
-	}
-	
-#ifdef _WIN64
-	pSysInfo->Is64BitProcess = TRUE;
-#else
-	pSysInfo->Is64BitProcess = FALSE;
-#endif
-	
-	return TRUE;
-}
-
-// 检查系统兼容性
-BOOL CheckSystemCompatibility() 
-{
-	DLL_SYSTEM_INFO sysInfo;
-	if (!GetSystemInfo(&sysInfo)) {
-		printf("Failed to get system information\n");
-		return FALSE;
-	}
-	
-	// 检查Windows版本兼容性
-	if (sysInfo.MajorVersion < 6) {  // 低于Windows Vista
-		printf("Unsupported Windows version: %d.%d\n", 
-			sysInfo.MajorVersion, sysInfo.MinorVersion);
-		return FALSE;
-	}
-	
-	// Windows版本特定功能检查
-	if (sysInfo.MajorVersion == 6) {  // Windows Vista/7/8/8.1
-		printf("When running on Windows Vista/7/8/8.1, some advanced features may not be available\n");
-	} else if (sysInfo.MajorVersion == 10) {  // Windows 10/11
-		printf("Running on Windows 10/11, all features are available\n");
-	}
-	
-	// 检查32/64位兼容性
-#ifdef _WIN64
-	if (!sysInfo.Is64BitOS) {
-		printf("64-bit DLL cannot run on 32-bit system\n");
-		return FALSE;
-	}
-#endif
-	
-	printf("System Version: Windows %d.%d.%d (%s)\n",
-		sysInfo.MajorVersion,
-		sysInfo.MinorVersion,
-		sysInfo.BuildNumber,
-		sysInfo.Is64BitOS ? "64-bit" : "32-bit");
-		
-	return TRUE;
-}
-
 #ifdef _MANAGED
 #pragma managed(push, off)
 #endif
 
 
 // 装载NT驱动程序
-HANDLE drvhandle;
+HANDLE drvhandle = INVALID_HANDLE_VALUE;
+namespace {
+    // Lock order: lifecycle -> device. Every exported input call holds device
+    // until all of its synchronous IOCTLs have returned.
+    std::mutex g_lifecycleMutex;
+    std::mutex g_deviceMutex;
+    std::atomic<bool> g_acceptingInput{false};
+    std::array<KEYBOARD_INPUT_DATA, 256> g_pressedKeys{};
+    std::array<bool, 256> g_keyDown{};
+    USHORT g_pressedMouse = 0;
+
+    BOOL Fail(DWORD error) {
+        g_DriverState.detailedErrorCode = error;
+        SetLastError(error);
+        return FALSE;
+    }
+
+    BOOL SendInputRequest(DWORD code, LPVOID input, DWORD size, LPVOID output,
+                          DWORD outputSize, LPDWORD returned, LPOVERLAPPED overlapped) {
+        if (!g_acceptingInput.load()) return Fail(ERROR_OPERATION_ABORTED);
+        if (!DeviceIoControl(drvhandle, code, input, size, output, outputSize, returned, overlapped))
+            return Fail(GetLastError());
+        if (code == IOCTL_KEYBOARD) {
+            const auto& key = *static_cast<KEYBOARD_INPUT_DATA*>(input);
+            if (key.MakeCode < g_keyDown.size()) {
+                g_keyDown[key.MakeCode] = !(key.Flags & KEY_BREAK);
+                g_pressedKeys[key.MakeCode] = key;
+            }
+        } else if (code == IOCTL_MOUSE) {
+            USHORT flags = static_cast<MOUSE_INPUT_DATA*>(input)->ButtonFlags;
+            for (USHORT down = 1; down <= MOUSE_BUTTON_5_DOWN; down <<= 2) {
+                if (flags & down) g_pressedMouse |= down;
+                if (flags & (down << 1)) g_pressedMouse &= ~down;
+            }
+        }
+        SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    }
+
+    // Called with device locked and input disabled. Retain failed releases so
+    // the caller can retry; never close the handle and report a false success.
+    BOOL ReleasePressedInput() {
+        DWORD firstError = ERROR_SUCCESS, returned = 0;
+        for (size_t i = 0; i < g_keyDown.size(); ++i) {
+            if (!g_keyDown[i]) continue;
+            auto key = g_pressedKeys[i];
+            key.Flags |= KEY_BREAK;
+            if (DeviceIoControl(drvhandle, IOCTL_KEYBOARD, &key, sizeof(key), nullptr, 0, &returned, nullptr))
+                g_keyDown[i] = false;
+            else if (!firstError) firstError = GetLastError();
+        }
+        for (USHORT down = 1; down <= MOUSE_BUTTON_5_DOWN; down <<= 2) {
+            if (!(g_pressedMouse & down)) continue;
+            MOUSE_INPUT_DATA mouse{};
+            mouse.ButtonFlags = down << 1;
+            if (DeviceIoControl(drvhandle, IOCTL_MOUSE, &mouse, sizeof(mouse), nullptr, 0, &returned, nullptr))
+                g_pressedMouse &= ~down;
+            else if (!firstError) firstError = GetLastError();
+        }
+        if (firstError) return Fail(firstError);
+        SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    }
+
+    BOOL CloseDevice() {
+        g_acceptingInput = false;
+        std::lock_guard<std::mutex> lock(g_deviceMutex);
+        g_DriverState.status = DEVICE_STATUS_UNKNOWN;
+        if (!ReleasePressedInput()) return FALSE;
+        if (drvhandle != INVALID_HANDLE_VALUE && drvhandle != nullptr) {
+            if (!CloseHandle(drvhandle)) return Fail(GetLastError());
+            drvhandle = INVALID_HANDLE_VALUE;
+        }
+        return TRUE;
+    }
+}
+
+extern "C" __declspec(dllexport) DWORD __cdecl GetLifecycleVersion() { return 1; }
+extern "C" __declspec(dllexport) BOOL __cdecl StopNTDriver(char* name);
+extern "C" __declspec(dllexport) BOOL __cdecl StopInputProcessing() {
+    std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+    g_acceptingInput = false;
+    std::lock_guard<std::mutex> device(g_deviceMutex);
+    g_DriverState.status = DEVICE_STATUS_UNKNOWN;
+    return ReleasePressedInput();
+}
 extern "C" __declspec(dllexport) BOOL __cdecl SetHandle();
 // extern "C" __declspec(dllexport) void __cdecl SetHandle(HANDLE handle);
 extern "C" __declspec(dllexport) void __cdecl KeyDown(USHORT VirtualKey);
@@ -188,6 +180,7 @@ DEVICE_STATUS CheckDriverStatus(HANDLE deviceHandle)
 	if (deviceHandle == INVALID_HANDLE_VALUE || deviceHandle == NULL) {
 		printf("Error: Invalid device handle\n");
 		g_DriverState.detailedErrorCode = 1001; // 句柄无效错误
+        SetLastError(ERROR_INVALID_HANDLE);
 		return DEVICE_STATUS_ERROR;
 	}
 
@@ -223,6 +216,7 @@ DEVICE_STATUS CheckDriverStatus(HANDLE deviceHandle)
 		printf("Error: Mouse device not available, error code: %d\n", lastError);
 	}
 	
+    SetLastError(lastError);
 	// 根据检查结果返回不同状态
 	if (!keyboardAvailable && !mouseAvailable) {
 		return DEVICE_STATUS_NO_KEYBOARD; // 键盘和鼠标设备都不可用，报告键盘不可用
@@ -239,11 +233,9 @@ DEVICE_STATUS CheckDriverStatus(HANDLE deviceHandle)
 // 导出函数：检查驱动状态
 extern "C" __declspec(dllexport) void __cdecl CheckDeviceStatus()
 {
-	ULONGLONG currentTime = GetSystemTimeMs();
-	
-	// 检查驱动状态
-	g_DriverState.status = CheckDriverStatus(drvhandle);
-	g_DriverState.lastCheckTime = currentTime;
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    g_DriverState.status = g_acceptingInput ? CheckDriverStatus(drvhandle) : DEVICE_STATUS_UNKNOWN;
+    g_DriverState.lastCheckTime = GetSystemTimeMs();
 }
 
 // 导出函数：获取驱动状态
@@ -261,7 +253,8 @@ extern "C" __declspec(dllexport) ULONGLONG __cdecl GetLastCheckTime()
 // 导出函数：获取驱动句柄
 extern "C" __declspec(dllexport) HANDLE __cdecl GetDriverHandle()
 {
-	return drvhandle;
+	std::lock_guard<std::mutex> lock(g_deviceMutex);
+	return drvhandle; // Borrowed handle: callers must not close it or use it for concurrent I/O.
 }
 
 // 添加导出函数：获取详细错误代码
@@ -270,57 +263,48 @@ extern "C" __declspec(dllexport) int __cdecl GetDetailedErrorCode()
 	return g_DriverState.detailedErrorCode;
 }
 
-// SetHandle函数
+// Connect only after the service is running. Reopening a paused session must
+// not discard its outstanding key releases; finish Stop/Unload first.
 BOOL SetHandle()
 {
-	// 检查是否已经有有效句柄
-	if (drvhandle != NULL && drvhandle != INVALID_HANDLE_VALUE) {
-		CloseHandle(drvhandle);
-		drvhandle = NULL;
-	}
-
-	drvhandle = CreateFile(
-		KEYMOUSE_WIN32_DEVICE_NAME,
-		GENERIC_WRITE | GENERIC_READ,
-		0,
-		NULL,
-		OPEN_EXISTING,
-		0,
-		0);
-
-	if (drvhandle == INVALID_HANDLE_VALUE || drvhandle == NULL) {
-		DWORD error = GetLastError();
-		printf("Error: Cannot open device, error code: %d\n", error);
-		return FALSE;
-	}
-
-	// 初始化驱动状态
-	CheckDeviceStatus();
-	
-	// 打印初始状态
-	DEVICE_STATUS status = g_DriverState.status.load();
-	printf("Driver Status: %s\n", 
-		status == DEVICE_STATUS_READY ? "Ready" :
-		status == DEVICE_STATUS_ERROR ? "Error" :
-		status == DEVICE_STATUS_NO_KEYBOARD ? "No Keyboard" :
-		status == DEVICE_STATUS_NO_MOUSE ? "No Mouse" : "Unknown");
-	
-	return status == DEVICE_STATUS_READY;
+    std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+    std::lock_guard<std::mutex> device(g_deviceMutex);
+    if (drvhandle != INVALID_HANDLE_VALUE && drvhandle != nullptr) {
+        if (!g_acceptingInput) return Fail(ERROR_BUSY);
+        SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    }
+    drvhandle = CreateFileA("\\\\.\\cqkeys", GENERIC_READ | GENERIC_WRITE, 0,
+                            nullptr, OPEN_EXISTING, 0, nullptr);
+    if (drvhandle == INVALID_HANDLE_VALUE) return Fail(GetLastError());
+    g_DriverState.status = CheckDriverStatus(drvhandle);
+    g_DriverState.lastCheckTime = GetSystemTimeMs();
+    if (g_DriverState.status != DEVICE_STATUS_READY) {
+        DWORD error = GetLastError();
+        CloseHandle(drvhandle);
+        drvhandle = INVALID_HANDLE_VALUE;
+        return Fail(error ? error : ERROR_NOT_READY);
+    }
+    g_acceptingInput = true;
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
 }
 
-// 内联辅助函数
 __forceinline bool IsKeyboardReady() {
-	return g_DriverState.status == DEVICE_STATUS_READY;
+    if (!g_acceptingInput || g_DriverState.status != DEVICE_STATUS_READY) {
+        Fail(ERROR_NOT_READY);
+        return false;
+    }
+    return true;
 }
 
-__forceinline bool IsMouseReady() {
-	return g_DriverState.status == DEVICE_STATUS_READY;
-}
-
+__forceinline bool IsMouseReady() { return IsKeyboardReady(); }
 
 // 键盘按下
 void __cdecl KeyDown(USHORT VirtualKey)
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	if (!IsKeyboardReady()) {
 		return;
 	}
@@ -331,25 +315,29 @@ void __cdecl KeyDown(USHORT VirtualKey)
 	kid.Flags = KEY_DOWN;
 	kid.MakeCode = (USHORT)MapVirtualKey(VirtualKey, 0);
 
-	DeviceIoControl(drvhandle, IOCTL_KEYBOARD, &kid, sizeof(KEYBOARD_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_KEYBOARD, &kid, sizeof(KEYBOARD_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 键盘抬起
 void __cdecl KeyUp(USHORT VirtualKey)
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	KEYBOARD_INPUT_DATA  kid;
 	DWORD dwOutput;
 	memset(&kid, 0, sizeof(KEYBOARD_INPUT_DATA));
 	kid.Flags = KEY_UP;
 	kid.MakeCode = (USHORT)MapVirtualKey(VirtualKey, 0);
 
-	DeviceIoControl(drvhandle, IOCTL_KEYBOARD, &kid, sizeof(KEYBOARD_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_KEYBOARD, &kid, sizeof(KEYBOARD_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 
 }
 
 // 鼠标左键按下
 void __cdecl MouseLeftButtonDown()
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	if (!IsMouseReady()) {
 		return;
 	}
@@ -358,63 +346,75 @@ void __cdecl MouseLeftButtonDown()
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_LEFT_BUTTON_DOWN;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 
 // 鼠标左键抬起
 void __cdecl MouseLeftButtonUp()
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_LEFT_BUTTON_UP;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 鼠标右键按下
 void __cdecl MouseRightButtonDown()
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_RIGHT_BUTTON_DOWN;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 鼠标右键抬起
 void __cdecl MouseRightButtonUp()
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_RIGHT_BUTTON_UP;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 鼠标中键按下
 void __cdecl MouseMiddleButtonDown()
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_MIDDLE_BUTTON_DOWN;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 鼠标中键抬起
 void __cdecl MouseMiddleButtonUp()
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_MIDDLE_BUTTON_UP;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 鼠标相对移动优化版
 void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
     if (!IsMouseReady()) {
         return;
     }
@@ -465,7 +465,7 @@ void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
         mid.LastX = dx;
         mid.LastY = dy;
         
-        if (!DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), 
+        if (!SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA),
                             NULL, 0, &dwOutput, NULL)) {
             DWORD error = GetLastError();
         }
@@ -477,7 +477,7 @@ void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
         mid.LastX = dx;
         mid.LastY = dy;
         
-        if (!DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), 
+        if (!SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA),
                             NULL, 0, &dwOutput, NULL)) {
             DWORD error = GetLastError();
         }
@@ -535,10 +535,9 @@ void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
             mid.LastX = moveX;
             mid.LastY = moveY;
             
-            if (!DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), 
+            if (!SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA),
                                 NULL, 0, &dwOutput, NULL)) {
-                DWORD error = GetLastError();
-                break; // 发生错误时终止剩余步骤
+                return; // Preserve the first failure; do not send a final correction.
             }
             
             // 动态延迟：距离越大，延迟越短，但确保有最小延迟
@@ -562,7 +561,7 @@ void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
             mid.LastX = finalMoveX;
             mid.LastY = finalMoveY;
             
-            if (!DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), 
+            if (!SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA),
                                 NULL, 0, &dwOutput, NULL)) {
                 DWORD error = GetLastError();
             }
@@ -573,6 +572,8 @@ void __cdecl MouseMoveRELATIVE(LONG dx, LONG dy)
 // 鼠标绝对移动
 void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy)
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
     if (!IsMouseReady()) {
         return;
     }
@@ -618,332 +619,248 @@ void __cdecl MouseMoveABSOLUTE(LONG dx, LONG dy)
     mid.LastY = (std::max)(0L, (std::min)(normalizedY, 65535L));
 
     // 6. 发送移动命令
-    if (!DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL)) {
+    if (!SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL)) {
         DWORD error = GetLastError();
         printf("鼠标移动失败，错误码: %ld\n", error);
+        Fail(error);
     }
 }
 
 // 鼠标XButton1按下
 void __cdecl MouseXButton1Down()
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_BUTTON_4_DOWN;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 鼠标XButton1抬起
 void __cdecl MouseXButton1Up()
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_BUTTON_4_UP;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 鼠标XButton2按下
 void __cdecl MouseXButton2Down()
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_BUTTON_5_DOWN;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 鼠标XButton2抬起
 void __cdecl MouseXButton2Up()
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_BUTTON_5_UP;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 鼠标滚轮向上
 void __cdecl MouseWheelUp(USHORT wheelDelta)
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_WHEEL;
 	mid.ButtonData = wheelDelta;
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
 // 鼠标滚轮向下
 void __cdecl MouseWheelDown(USHORT wheelDelta)
 {
+    std::lock_guard<std::mutex> lock(g_deviceMutex);
+    SetLastError(ERROR_SUCCESS);
 	MOUSE_INPUT_DATA  mid;
 	DWORD dwOutput;
 	memset(&mid, 0, sizeof(MOUSE_INPUT_DATA));
 	mid.ButtonFlags = MOUSE_WHEEL;
 	mid.ButtonData = (USHORT)(-wheelDelta);  // 负值表示向下滚动
-	DeviceIoControl(drvhandle, IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
+	SendInputRequest(IOCTL_MOUSE, &mid, sizeof(MOUSE_INPUT_DATA), NULL, 0, &dwOutput, NULL);
 }
 
-// 装载驱动程序
-BOOL __cdecl LoadNTDriver(char* lpszDriverName, char* lpszDriverPath)
+namespace {
+    constexpr DWORD kServiceTimeoutMs = 5000;
+    class ServiceHandle {
+    public:
+        explicit ServiceHandle(SC_HANDLE handle) : value(handle) {}
+        ~ServiceHandle() { Close(); }
+        ServiceHandle(const ServiceHandle&) = delete;
+        ServiceHandle& operator=(const ServiceHandle&) = delete;
+        void Close() {
+            DWORD error = GetLastError();
+            if (value) { CloseServiceHandle(value); value = nullptr; }
+            SetLastError(error);
+        }
+        SC_HANDLE value;
+    };
+
+    BOOL Success() {
+        g_DriverState.detailedErrorCode = ERROR_SUCCESS;
+        SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    }
+
+    BOOL ValidateName(const char* name) {
+        // All input functions address the fixed cqkeys device. Never stop an
+        // unrelated service supplied by mistake through the legacy ABI.
+        if (!name || _stricmp(name, "cqkeys") != 0) return Fail(ERROR_INVALID_NAME);
+        return TRUE;
+    }
+
+    BOOL WaitForState(SC_HANDLE service, DWORD wanted) {
+        DWORD start = GetTickCount();
+        for (;;) {
+            SERVICE_STATUS status{};
+            if (!QueryServiceStatus(service, &status)) return Fail(GetLastError());
+            if (status.dwCurrentState == wanted) return TRUE;
+            if (wanted == SERVICE_RUNNING && status.dwCurrentState == SERVICE_STOPPED)
+                return Fail(status.dwWin32ExitCode ? status.dwWin32ExitCode : ERROR_SERVICE_NOT_ACTIVE);
+            if (GetTickCount() - start >= kServiceTimeoutMs) return Fail(ERROR_TIMEOUT);
+            Sleep(50);
+        }
+    }
+
+    BOOL StopServiceAndWait(SC_HANDLE service) {
+        SERVICE_STATUS status{};
+        DWORD start = GetTickCount();
+        do {
+            if (!QueryServiceStatus(service, &status)) return Fail(GetLastError());
+            if (status.dwServiceType != SERVICE_KERNEL_DRIVER) return Fail(ERROR_INVALID_SERVICE_CONTROL);
+            if (status.dwCurrentState != SERVICE_START_PENDING) break;
+            if (GetTickCount() - start >= kServiceTimeoutMs) return Fail(ERROR_TIMEOUT);
+            Sleep(50);
+        } while (true);
+        if (status.dwCurrentState == SERVICE_STOPPED) return TRUE;
+        if (status.dwCurrentState != SERVICE_STOP_PENDING &&
+            !ControlService(service, SERVICE_CONTROL_STOP, &status)) {
+            DWORD error = GetLastError();
+            if (error != ERROR_SERVICE_NOT_ACTIVE) return Fail(error);
+        }
+        // Query failures and timeouts must never fall through to DeleteService.
+        return WaitForState(service, SERVICE_STOPPED);
+    }
+
+    BOOL WaitForDeletion(SC_HANDLE scm, const char* name) {
+        DWORD start = GetTickCount();
+        for (;;) {
+            ServiceHandle probe(OpenServiceA(scm, name, SERVICE_QUERY_STATUS));
+            if (!probe.value) {
+                DWORD error = GetLastError();
+                if (error == ERROR_SERVICE_DOES_NOT_EXIST) return TRUE;
+                if (error != ERROR_SERVICE_MARKED_FOR_DELETE) return Fail(error);
+            }
+            probe.Close();
+            if (GetTickCount() - start >= kServiceTimeoutMs) return Fail(ERROR_TIMEOUT);
+            Sleep(50);
+        }
+    }
+
+    BOOL StopDriver(const char* name, bool uninstall) {
+        std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+        if (!ValidateName(name)) return FALSE;
+        if (!CloseDevice()) return FALSE;
+        ServiceHandle scm(OpenSCManagerA(nullptr, nullptr, SC_MANAGER_CONNECT));
+        if (!scm.value) return Fail(GetLastError());
+        ServiceHandle service(OpenServiceA(scm.value, name,
+            SERVICE_STOP | SERVICE_QUERY_STATUS | (uninstall ? DELETE : 0)));
+        if (!service.value) {
+            DWORD error = GetLastError();
+            return error == ERROR_SERVICE_DOES_NOT_EXIST ? Success() : Fail(error);
+        }
+        if (!StopServiceAndWait(service.value)) return FALSE;
+        if (uninstall) {
+            if (!DeleteService(service.value) && GetLastError() != ERROR_SERVICE_MARKED_FOR_DELETE)
+                return Fail(GetLastError());
+            service.Close();
+            if (!WaitForDeletion(scm.value, name)) return FALSE;
+        }
+        return Success();
+    }
+}
+
+BOOL __cdecl LoadNTDriver(char* name, char* path)
 {
-	// 先检查驱动是否已经加载
-	if (drvhandle != NULL && drvhandle != INVALID_HANDLE_VALUE) {
-		printf("Driver already loaded!\n");
-		return TRUE;
-	}
+    std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+    if (!ValidateName(name)) return FALSE;
+    if (!path || !*path) return Fail(ERROR_INVALID_PARAMETER);
+    char fullPath[MAX_PATH];
+    DWORD length = GetFullPathNameA(path, MAX_PATH, fullPath, nullptr);
+    if (!length) return Fail(GetLastError());
+    if (length >= MAX_PATH) return Fail(ERROR_FILENAME_EXCED_RANGE);
+    DWORD attributes = GetFileAttributesA(fullPath);
+    if (attributes == INVALID_FILE_ATTRIBUTES) return Fail(GetLastError());
+    if (attributes & FILE_ATTRIBUTE_DIRECTORY) return Fail(ERROR_INVALID_PARAMETER);
 
-	BOOL bRet = FALSE;
-	SC_HANDLE hServiceMgr = NULL;
-	SC_HANDLE hServiceDDK = NULL;
-	const DWORD START_TIMEOUT = 3000; // 启动超时时间(毫秒)
-	
-	// 1. 添加权限检查
-	HANDLE hToken;
-	BOOL isElevated = FALSE;
-	if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
-		TOKEN_ELEVATION elevation;
-		DWORD dwSize;
-		if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &dwSize)) {
-			isElevated = elevation.TokenIsElevated;
-		}
-		CloseHandle(hToken);
-	}
-	
-	if (!isElevated) {
-		SetLastError(ERROR_ACCESS_DENIED);
-		printf("Elevated privileges required. Please run as administrator.\n");
-		return FALSE;
-	}
-	
-	// 2. 增强错误处理的OpenSCManager调用
-	hServiceMgr = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-	if (!hServiceMgr) {
-		DWORD error = GetLastError();
-		char* errorMessage = NULL;
-		FormatMessageA(
-			FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
-			NULL,
-			error,
-			0,
-			(LPSTR)&errorMessage,
-			0,
-			NULL
-		);
-		printf("OpenSCManager failed with detailed error: %d - %s\n", error, errorMessage);
-		LocalFree(errorMessage);
-		return FALSE;
-	}
-	
-	// 3. 快速检查系统兼容性
-	if (!CheckSystemCompatibility()) {
-		printf("System compatibility check failed\n");
-		return FALSE;
-	}
-	
-	// 4. 尝试打开已存在的服务
-	hServiceDDK = OpenServiceA(hServiceMgr, lpszDriverName, SERVICE_ALL_ACCESS);
-	if (hServiceDDK) {
-		// 服务已存在，尝试直接启动
-		SERVICE_STATUS status;
-		QueryServiceStatus(hServiceDDK, &status);
-		
-		if (status.dwCurrentState == SERVICE_RUNNING) {
-			printf("Service is already running\n");
-			bRet = TRUE;
-			goto cleanup;
-		}
-		
-		// 停止服务以确保清洁状态
-		ControlService(hServiceDDK, SERVICE_CONTROL_STOP, &status);
-		Sleep(100); // 简短等待
-		
-		// 删除现有服务
-		DeleteService(hServiceDDK);
-		CloseServiceHandle(hServiceDDK);
-		hServiceDDK = NULL;
-	}
-	
-	// 5. 创建新服务
-	hServiceDDK = CreateServiceA(
-		hServiceMgr,
-		lpszDriverName,        // 驱动程序的在注册表中的名字  
-		lpszDriverName,        // 注册表驱动程序的 DisplayName 值  
-		SERVICE_ALL_ACCESS,    // 加载驱动程序的访问权限  
-		SERVICE_KERNEL_DRIVER, // 表示加载的服务是驱动程序  
-		SERVICE_DEMAND_START,  // 注册表驱动程序的 Start 值  
-		SERVICE_ERROR_IGNORE,  // 注册表驱动程序的 ErrorControl 值  
-		lpszDriverPath,        // 注册表驱动程序的 ImagePath 值  
-		NULL,                  // LoadOrderGroup
-		NULL,                  // TagId
-		NULL,                  // Dependencies
-		NULL,                  // ServiceStartName
-		NULL                   // Password
-	);
-	
-	if (!hServiceDDK) {
-		printf("Create service failed: %d\n", GetLastError());
-		goto cleanup;
-	}
-	
-	// 6. 启动服务
-	if (!StartService(hServiceDDK, 0, NULL)) {
-		DWORD error = GetLastError();
-		if (error == ERROR_SERVICE_ALREADY_RUNNING) {
-			printf("Service is already running\n");
-			bRet = TRUE;
-		} else {
-			printf("Start service failed: %d\n", error);
-		}
-		goto cleanup;
-	}
-	
-	// 7. 等待服务启动完成
-	SERVICE_STATUS status;
-	DWORD startTime = GetTickCount();
-	while (TRUE) {
-		if (!QueryServiceStatus(hServiceDDK, &status)) {
-			break;
-		}
-		
-		if (status.dwCurrentState == SERVICE_RUNNING) {
-			printf("Service start success!\n");
-			bRet = TRUE;
-			break;
-		}
-		
-		if (GetTickCount() - startTime > START_TIMEOUT) {
-			printf("Service start timeout!\n");
-			break;
-		}
-		
-		Sleep(50); // 短暂等待
-	}
-	
-cleanup:
-	if (hServiceDDK) {
-		CloseServiceHandle(hServiceDDK);
-	}
-	if (hServiceMgr) {
-		CloseServiceHandle(hServiceMgr);
-	}
-	return bRet;
+    ServiceHandle scm(OpenSCManagerA(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE));
+    if (!scm.value) return Fail(GetLastError());
+    ServiceHandle service(OpenServiceA(scm.value, name, SERVICE_START | SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG));
+    if (!service.value) {
+        DWORD error = GetLastError();
+        if (error != ERROR_SERVICE_DOES_NOT_EXIST) return Fail(error);
+        service.value = CreateServiceA(scm.value, name, name,
+            SERVICE_START | SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG,
+            SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
+            fullPath, nullptr, nullptr, nullptr, nullptr, nullptr);
+        if (!service.value) return Fail(GetLastError());
+    }
+    // Reuse an existing registration only when it actually names this binary.
+    // Never delete/recreate a running service as part of initialization.
+    DWORD bytes = 0;
+    QueryServiceConfigA(service.value, nullptr, 0, &bytes);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) return Fail(GetLastError());
+    std::vector<BYTE> buffer(bytes);
+    auto config = reinterpret_cast<QUERY_SERVICE_CONFIGA*>(buffer.data());
+    if (!QueryServiceConfigA(service.value, config, bytes, &bytes)) return Fail(GetLastError());
+    std::string registered = config->lpBinaryPathName;
+    if (registered.size() >= 2 && registered.front() == '"' && registered.back() == '"')
+        registered = registered.substr(1, registered.size() - 2);
+    if (registered.compare(0, 4, "\\??\\") == 0) registered.erase(0, 4);
+    if (config->dwServiceType != SERVICE_KERNEL_DRIVER || _stricmp(registered.c_str(), fullPath) != 0)
+        return Fail(ERROR_SERVICE_EXISTS);
+
+    SERVICE_STATUS status{};
+    if (!QueryServiceStatus(service.value, &status)) return Fail(GetLastError());
+    if (status.dwCurrentState == SERVICE_STOP_PENDING) {
+        if (!WaitForState(service.value, SERVICE_STOPPED)) return FALSE;
+        status.dwCurrentState = SERVICE_STOPPED;
+    }
+    if (status.dwCurrentState == SERVICE_RUNNING) return Success();
+    if (status.dwCurrentState != SERVICE_START_PENDING && !StartServiceA(service.value, 0, nullptr)) {
+        DWORD error = GetLastError();
+        if (error != ERROR_SERVICE_ALREADY_RUNNING) return Fail(error);
+    }
+    if (!WaitForState(service.value, SERVICE_RUNNING)) return FALSE;
+    return Success();
 }
 
-// 卸载驱动程序  
-BOOL __cdecl UnloadNTDriver(char* szSvrName)
-{
-	BOOL bRet = FALSE;
-	SC_HANDLE hServiceMgr = NULL;	// SCM管理器的句柄
-	SC_HANDLE hServiceDDK = NULL;	// NT驱动程序的服务句柄
-	SERVICE_STATUS status;		// 服务状态
-	const DWORD STOP_TIMEOUT = 3000; // 停止超时时间(毫秒)
-	
-	// 1. 关闭设备句柄并重置状态
-	if (drvhandle != INVALID_HANDLE_VALUE && drvhandle != NULL) {
-		CloseHandle(drvhandle);
-		drvhandle = INVALID_HANDLE_VALUE;
-	}
-	g_DriverState.status = DEVICE_STATUS_UNKNOWN;
-	
-	// 2. 打开服务管理器
-	hServiceMgr = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-	if (!hServiceMgr) {
-		printf("OpenSCManager() Failed: %d\n", GetLastError());
-		return FALSE;
-	}
-	printf("OpenSCManager() ok ! \n");
-	
-	// 3. 打开服务
-	hServiceDDK = OpenServiceA(hServiceMgr, szSvrName, SERVICE_ALL_ACCESS);
-	if (!hServiceDDK) {
-		DWORD error = GetLastError();
-		if (error == ERROR_SERVICE_DOES_NOT_EXIST) {
-			printf("Service does not exist, considering unload successful\n");
-			bRet = TRUE;
-		} else {
-			printf("Open service failed: %d\n", error);
-		}
-		goto cleanup;
-	}
-	
-	// 4. 获取服务状态
-	if (!QueryServiceStatus(hServiceDDK, &status)) {
-		printf("Get service status failed: %d\n", GetLastError());
-		goto cleanup;
-	}
-	
-	// 5. 如果服务正在运行，尝试停止
-	if (status.dwCurrentState != SERVICE_STOPPED) {
-		// 发送停止信号
-		if (!ControlService(hServiceDDK, SERVICE_CONTROL_STOP, &status)) {
-			DWORD error = GetLastError();
-			if (error != ERROR_SERVICE_NOT_ACTIVE) {
-				printf("Stop service failed: %d\n", error);
-				goto cleanup;
-			}
-		}
-		
-		// 等待服务停止
-		DWORD startTime = GetTickCount();
-		while (status.dwCurrentState != SERVICE_STOPPED) {
-			Sleep(50); // 短暂等待
-			if (!QueryServiceStatus(hServiceDDK, &status)) {
-				break;
-			}
-			
-			if (GetTickCount() - startTime > STOP_TIMEOUT) {
-				printf("Stop service timeout\n");
-				goto cleanup;
-			}
-		}
-	}
-	
-	// 6. 删除服务
-	if (!DeleteService(hServiceDDK)) {
-		DWORD error = GetLastError();
-		if (error != ERROR_SERVICE_MARKED_FOR_DELETE) {
-			printf("Delete service failed: %d\n", error);
-			goto cleanup;
-		}
-	}
-	
-	printf("Service unload success!\n");
-	bRet = TRUE;
-	
-cleanup:
-	if (hServiceDDK) {
-		CloseServiceHandle(hServiceDDK);
-	}
-	if (hServiceMgr) {
-		CloseServiceHandle(hServiceMgr);
-	}
-	return bRet;
-}
+BOOL __cdecl StopNTDriver(char* name) { return StopDriver(name, false); }
+BOOL __cdecl UnloadNTDriver(char* name) { return StopDriver(name, true); }
 
-BOOL APIENTRY DllMain(HMODULE hModule,
-	DWORD  ul_reason_for_call,
-	LPVOID lpReserved
-)
-{/*
-if (ul_reason_for_call==DLL_PROCESS_ATTACH)
-  { LoadNTDriver("cqkeys","cqkeys.sys");
-	drvhandle= CreateFileA("\\\\.\\cqkeys",
-		GENERIC_WRITE | GENERIC_READ,
-		0,
-		NULL,
-		OPEN_EXISTING,
-		0,
-		NULL);
-   }
-else if (ul_reason_for_call==DLL_PROCESS_DETACH)
-   {CloseHandle(drvhandle);
-	  UnloadNTDriver("cqkeys");
-	}*/
-	return TRUE;
-}
+// Never perform SCM work or wait for threads under the loader lock.
+// Call StopNTDriver/UnloadNTDriver explicitly before FreeLibrary.
+BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
 
 #ifdef _MANAGED
 #pragma managed(pop)

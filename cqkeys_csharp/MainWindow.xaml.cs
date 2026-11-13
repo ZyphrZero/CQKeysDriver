@@ -1,11 +1,14 @@
 ﻿using System;
 using System.Windows;
+using System.ComponentModel;
 
 namespace CqKeys
 {
     public partial class MainWindow : Window
     {
         private readonly DriverService _driverService;
+        private bool operationPending;
+        private bool closeAllowed;
 
         public MainWindow(DriverService driverService)
         {
@@ -32,15 +35,16 @@ namespace CqKeys
 
         private void UpdateButtonStates()
         {
-            InstallButton.IsEnabled = !_driverService.IsDriverInstalled;
-            UninstallButton.IsEnabled = _driverService.IsDriverInstalled;
+            InstallButton.IsEnabled = !operationPending && !_driverService.NeedsCleanup;
+            UninstallButton.IsEnabled = !operationPending && _driverService.NeedsCleanup;
         }
 
         private async void InstallButton_Click(object sender, RoutedEventArgs e)
         {
             try
             {
-                InstallButton.IsEnabled = false;
+                operationPending = true;
+                UpdateButtonStates();
                 await _driverService.InitializeDriverAsync();
             }
             catch (UnauthorizedAccessException)
@@ -55,6 +59,7 @@ namespace CqKeys
             }
             finally
             {
+                operationPending = false;
                 UpdateButtonStates();
             }
         }
@@ -63,7 +68,8 @@ namespace CqKeys
         {
             try
             {
-                UninstallButton.IsEnabled = false;
+                operationPending = true;
+                UpdateButtonStates();
                 await _driverService.UninstallDriverAsync();
             }
             catch (Exception ex)
@@ -73,8 +79,30 @@ namespace CqKeys
             }
             finally
             {
+                operationPending = false;
                 UpdateButtonStates();
             }
+        }
+
+        protected override async void OnClosing(CancelEventArgs e)
+        {
+            if (closeAllowed) { base.OnClosing(e); return; }
+            e.Cancel = true;
+            base.OnClosing(e);
+            if (operationPending) return;
+            operationPending = true;
+            UpdateButtonStates();
+            try
+            {
+                await _driverService.UninstallDriverAsync();
+                closeAllowed = true;
+                Close();
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show($"卸载失败，窗口保留以便重试：{error.Message}", "卸载失败");
+            }
+            finally { operationPending = false; UpdateButtonStates(); }
         }
 
         protected override void OnClosed(EventArgs e)

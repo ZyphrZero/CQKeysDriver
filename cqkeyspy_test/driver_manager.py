@@ -2,7 +2,8 @@
 
 import os
 import logging
-from ctypes import CDLL, c_int, c_ulonglong
+from ctypes import CDLL, c_int, c_ulonglong, c_char_p
+from threading import RLock
 import json
 import sys
 import ctypes
@@ -11,6 +12,7 @@ import ctypes
 class DriverManager:
     def __init__(self):
         self.driver = None
+        self._lock = RLock()
         self._setup_logging()
         
         # 在初始化时就检查权限
@@ -105,62 +107,75 @@ class DriverManager:
         return True
 
     def initialize(self):
-        """初始化驱动"""
-        try:
-            # 1. 检查并请求管理员权限
-            if not self.is_admin():
-                logging.warning("需要管理员权限才能加载驱动")
-                if not self.run_as_admin():
-                    raise PermissionError("无法获取管理员权限,请以管理员身份运行程序")
-                return False  # 程序将重启
-                
-            logging.info("开始加载驱动...")
-            self.driver = CDLL(self.dll_path)
-            
-            # 设置返回类型
-            self.driver.GetDriverStatus.restype = c_int
-            self.driver.GetLastCheckTime.restype = c_ulonglong
-            
-            # 先尝试卸载已存在的驱动
-            self._unload_driver()
-            
-            # 加载驱动
-            if not self.driver.LoadNTDriver(b'cqkeys', self.sys_path.encode()):
-                raise RuntimeError("驱动加载失败")
-            
-            # 设置句柄
-            self.driver.SetHandle()
-            logging.info("驱动初始化完成")
-            return True
-            
-        except Exception as e:
-            if isinstance(e, WindowsError) and e.winerror == 5:  # ERROR_ACCESS_DENIED
-                logging.error("访问被拒绝,请确保以管理员身份运行")
+        """加载并连接驱动；失败时保留可重试的管理对象，不删除已有服务。"""
+        with self._lock:
+            if self.driver is not None:
+                raise RuntimeError("请先停止或卸载当前驱动会话")
+            try:
                 if not self.is_admin():
-                    logging.info("尝试重新以管理员身份启动...")
-                    self.run_as_admin()
-            else:
-                logging.error(f"初始化失败: {str(e)}")
-            self.cleanup()
-            return False
-    
-    def _unload_driver(self):
-        """卸载驱动"""
-        try:
-            if self.driver:
-                self.driver.UnloadNTDriver(b'cqkeys')
-        except Exception as e:
-            logging.warning(f"卸载驱动时出现异常(可忽略): {str(e)}")
-    
-    def cleanup(self):
-        """清理资源"""
-        try:
-            if self.driver:
-                self._unload_driver()
-                logging.info("驱动卸载成功")
-        except Exception as e:
-            logging.error(f"清理失败: {str(e)}")
-    
+                    raise PermissionError("请以管理员身份运行程序")
+                native = CDLL(self.dll_path, use_last_error=True)
+                native.GetLifecycleVersion.argtypes = []
+                native.GetLifecycleVersion.restype = ctypes.c_uint32
+                if native.GetLifecycleVersion() != 1:
+                    raise RuntimeError("DLL 生命周期接口版本不匹配，请使用本分支构建的 DLL")
+                for name in ("LoadNTDriver", "StopNTDriver", "UnloadNTDriver"):
+                    function = getattr(native, name)
+                    function.argtypes = [c_char_p, c_char_p] if name == "LoadNTDriver" else [c_char_p]
+                    function.restype = c_int
+                for name in ("SetHandle", "StopInputProcessing"):
+                    function = getattr(native, name)
+                    function.argtypes = []
+                    function.restype = c_int
+                native.GetDriverStatus.restype = c_int
+                native.GetLastCheckTime.restype = c_ulonglong
+                for name in ("KeyDown", "KeyUp", "MouseWheelUp", "MouseWheelDown"):
+                    function = getattr(native, name)
+                    function.argtypes = [ctypes.c_ushort]
+                    function.restype = None
+                for name in ("MouseMoveRELATIVE", "MouseMoveABSOLUTE"):
+                    function = getattr(native, name)
+                    function.argtypes = [ctypes.c_long, ctypes.c_long]
+                    function.restype = None
+                for button in ("LeftButton", "RightButton", "MiddleButton", "XButton1", "XButton2"):
+                    for action in ("Down", "Up"):
+                        function = getattr(native, "Mouse" + button + action)
+                        function.argtypes = []
+                        function.restype = None
+                native.CheckDeviceStatus.argtypes = []
+                native.CheckDeviceStatus.restype = None
+                self.driver = native
+                if not self.driver.LoadNTDriver(b'cqkeys', self.sys_path.encode('mbcs')):
+                    error = ctypes.get_last_error()
+                    if error == 1073:  # ERROR_SERVICE_EXISTS: another binary owns this name.
+                        self.driver = None
+                    raise ctypes.WinError(error)
+                if not self.driver.SetHandle():
+                    raise ctypes.WinError(ctypes.get_last_error())
+                logging.info("驱动初始化完成")
+                return True
+            except Exception:
+                # DLL 负责清理连接失败的句柄；不能在这里卸载另一个客户端的服务。
+                logging.exception("驱动初始化失败；可使用卸载按钮重试清理")
+                return False
+
+    def stop_input(self):
+        """阻止新输入并释放本 DLL 会话记录的按键；失败必须交给调用方。"""
+        with self._lock:
+            if self.driver is not None and not self.driver.StopInputProcessing():
+                raise ctypes.WinError(ctypes.get_last_error())
+
+    def cleanup(self, uninstall=True):
+        """停止驱动；uninstall=False 保留服务注册以便再次加载。"""
+        with self._lock:
+            if self.driver is None:
+                return
+            operation = self.driver.UnloadNTDriver if uninstall else self.driver.StopNTDriver
+            if not operation(b'cqkeys'):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.driver = None
+            logging.info("驱动已卸载" if uninstall else "驱动已停止，服务注册已保留")
+
     def get_driver(self):
         """获取驱动实例"""
         return self.driver 

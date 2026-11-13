@@ -84,14 +84,14 @@ __forceinline NTSTATUS cqkeysDefaultHandler(IN PDEVICE_OBJECT DeviceObject, IN P
     Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
     Irp->IoStatus.Information = 0;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    return Irp->IoStatus.Status;
+    return STATUS_NOT_SUPPORTED;
 }
 
 // 优化设备控制函数
 NTSTATUS cqkeysDispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp)
 {
     const PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
-    const PDEVICE_EXTENSION deviceExtension = static_cast<PDEVICE_EXTENSION>(DeviceObject->DeviceExtension);
+    const ULONG inputLength = irpStack->Parameters.DeviceIoControl.InputBufferLength;
     const PVOID ioBuffer = Irp->AssociatedIrp.SystemBuffer;
     const ULONG ioControlCode = irpStack->Parameters.DeviceIoControl.IoControlCode;
     NTSTATUS status = STATUS_SUCCESS;
@@ -102,30 +102,52 @@ NTSTATUS cqkeysDispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp
         switch (ioControlCode)
         {
         case IOCTL_KEYBOARD:
-            if (ioBuffer && g_KoMCallBack.HasKeyboardCallback())
+            if (!g_KoMCallBack.HasKeyboardCallback()) {
+                status = STATUS_DEVICE_NOT_READY;
+                break;
+            }
+            if (inputLength == 0) break; // Existing DLL readiness probe.
+            if (!ioBuffer || inputLength < sizeof(KEYBOARD_INPUT_DATA)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
             {
-                // 创建非const副本以匹配回调函数签名
                 KEYBOARD_INPUT_DATA kid = *static_cast<PKEYBOARD_INPUT_DATA>(ioBuffer);
-                ULONG inputDataConsumed;
-                g_KoMCallBack.KeyboardClassServiceCallback(
-                    g_KoMCallBack.KdbDeviceObject,
-                    &kid,
-                    &kid + 1,
-                    &inputDataConsumed);
+                ULONG inputDataConsumed = 0;
+                KIRQL oldIrql;
+                KeRaiseIrql(DISPATCH_LEVEL, &oldIrql);
+                __try {
+                    g_KoMCallBack.KeyboardClassServiceCallback(
+                        g_KoMCallBack.KdbDeviceObject, &kid, &kid + 1, &inputDataConsumed);
+                } __finally {
+                    KeLowerIrql(oldIrql);
+                }
+                if (inputDataConsumed != 1) status = STATUS_DEVICE_BUSY;
             }
             break;
 
         case IOCTL_MOUSE:
-            if (ioBuffer && g_KoMCallBack.HasMouseCallback())
+            if (!g_KoMCallBack.HasMouseCallback()) {
+                status = STATUS_DEVICE_NOT_READY;
+                break;
+            }
+            if (inputLength == 0) break;
+            if (!ioBuffer || inputLength < sizeof(MOUSE_INPUT_DATA)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
             {
-                // 创建非const副本以匹配回调函数签名
                 MOUSE_INPUT_DATA mid = *static_cast<PMOUSE_INPUT_DATA>(ioBuffer);
-                ULONG inputDataConsumed;
-                g_KoMCallBack.MouseClassServiceCallback(
-                    g_KoMCallBack.MouDeviceObject,
-                    &mid,
-                    &mid + 1,
-                    &inputDataConsumed);
+                ULONG inputDataConsumed = 0;
+                KIRQL oldIrql;
+                KeRaiseIrql(DISPATCH_LEVEL, &oldIrql);
+                __try {
+                    g_KoMCallBack.MouseClassServiceCallback(
+                        g_KoMCallBack.MouDeviceObject, &mid, &mid + 1, &inputDataConsumed);
+                } __finally {
+                    KeLowerIrql(oldIrql);
+                }
+                if (inputDataConsumed != 1) status = STATUS_DEVICE_BUSY;
             }
             break;
 
@@ -589,7 +611,6 @@ void cqkeysUnload(IN PDRIVER_OBJECT DriverObject)
 {
     UNICODE_STRING win32Device;
     PDEVICE_OBJECT deviceObject = DriverObject->DeviceObject;
-    LARGE_INTEGER interval;
 
     KdPrint(("开始卸载驱动...\n"));
 
@@ -597,9 +618,9 @@ void cqkeysUnload(IN PDRIVER_OBJECT DriverObject)
     RtlInitUnicodeString(&win32Device, KEYMOUSE_DOS_DEVICE_NAME);
     IoDeleteSymbolicLink(&win32Device);
 
-    // 2. 等待100ms确保没有新的IRP
-    interval.QuadPart = -1000000; // 100ms in 100ns units
-    KeDelayExecutionThread(KernelMode, FALSE, &interval);
+    // This non-PnP driver completes every IRP synchronously and owns no worker,
+    // timer or DPC. The I/O manager calls DriverUnload only after device
+    // references and outstanding IRPs are gone; sleeping is not synchronization.
 
     if (deviceObject != NULL) {
         // 3. 清理设备扩展

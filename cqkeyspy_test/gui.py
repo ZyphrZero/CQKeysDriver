@@ -4,6 +4,8 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
+import queue
+from input_workers import InputWorkers, WorkCancelled
 from driver_manager import DriverManager
 from input_tester import InputTester
 from virtuakeys_mapping import VirtualKeys
@@ -34,7 +36,7 @@ class MONITORINFO(ctypes.Structure):
 # python gui.py --debug
 parser = argparse.ArgumentParser()
 parser.add_argument('--debug', action='store_true', help='启用调试模式')
-args = parser.parse_args()
+args = parser.parse_args() if __name__ == "__main__" else parser.parse_args([])
 
 # 使用命令行参数设置调试模式
 DEBUG_MODE = args.debug
@@ -63,6 +65,9 @@ class CQKeysGUI:
         self.input_tester = None
         self.is_driver_loaded = False
         self.is_closing = False
+        self.is_unloading = False
+        self.input_workers = InputWorkers()
+        self._cleanup_results = queue.Queue()
         self.config_file = "driver_config.json"
         
         # 路径配置变量（在创建根窗口后创建）
@@ -544,23 +549,14 @@ class CQKeysGUI:
                   width=15).pack(side=tk.LEFT, padx=5)
 
     def _on_closing(self):
-        """处理窗口关闭事件"""
-        self.is_closing = True
-        
-        # 停止键盘钩子
-        if self.keyboard_hook:
-            self.keyboard_hook.stop()
-            
-        # 停止自动移动
-        self.auto_move_running = False
-        
-        if self.driver_mgr:
-            try:
-                self.driver_mgr.cleanup()
-            except Exception as e:
-                print(f"清理驱动时出错: {str(e)}")  # 使用print而不是logging
-        self.root.destroy()
-    
+        # Keep Tk alive while workers finish; they may still have queued UI work.
+        self._begin_unload(close_after=True)
+
+    def _start_worker(self, target, args=()):
+        if self.is_unloading or self.is_closing or not self.is_driver_loaded:
+            return None
+        return self.input_workers.start(target, args)
+
     def _setup_logging(self):
         """设置日志处理"""
         class TextHandler(logging.Handler):
@@ -609,8 +605,8 @@ class CQKeysGUI:
     
     def _update_button_states(self, driver_loaded):
         """更新按钮状态"""
-        state = tk.NORMAL if driver_loaded else tk.DISABLED
-        self.unload_btn.config(state=state)
+        state = tk.NORMAL if driver_loaded and not self.is_unloading else tk.DISABLED
+        self.unload_btn.config(state=tk.NORMAL if self.driver_mgr and not self.is_unloading else tk.DISABLED)
         self.test_key_btn.config(state=state)
         self.test_input_btn.config(state=state)
         self.test_mouse_btn.config(state=state)
@@ -618,82 +614,129 @@ class CQKeysGUI:
         self.clear_btn.config(state=state)
         self.input_entry.config(state=state)
         self.check_status_btn.config(state=state)
-        self.load_btn.config(state=tk.DISABLED if driver_loaded else tk.NORMAL)
+        self.load_btn.config(state=tk.DISABLED if self.driver_mgr or self.is_unloading else tk.NORMAL)
         self.rapid_test_btn.config(state=state)
     
     def _load_driver(self):
-        """加载驱动"""
+        if self.is_unloading or self.driver_mgr is not None:
+            return False
         try:
-            # 获取当前设置的路径
-            dll_path = self.dll_path_var.get()
-            sys_path = self.sys_path_var.get()
-            
-            # 检查路径是否已配置
-            if not dll_path or not sys_path:
-                messagebox.showerror("错误", "请先配置驱动路径")
-                return
-            
-            self.driver_mgr = DriverManager()
-            
-            # 使用配置的路径
-            try:
-                self.driver_mgr._setup_paths(dll_path=dll_path, sys_path=sys_path)
-            except ValueError as ve:
-                messagebox.showerror("错误", str(ve))
-                return
-            except FileNotFoundError as fe:
-                messagebox.showerror("错误", str(fe))
-                return
-            
-            if self.driver_mgr.initialize():
-                self.input_tester = InputTester(self.driver_mgr.get_driver())
-                self.is_driver_loaded = True
-                self._update_button_states(True)
-                self._check_driver_status()  # 初始检查驱动状态
-            else:
-                messagebox.showerror("错误", "驱动加载失败")
-        except Exception as e:
-            messagebox.showerror("错误", f"驱动加载出错: {str(e)}")
-            logging.error(f"驱动加载出错: {str(e)}")
-    
-    def _unload_driver(self):
-        """卸载驱动"""
-        try:
-            if self.driver_mgr:
-                self.driver_mgr.cleanup()
-                self.driver_mgr = None
-                self.input_tester = None
-                self.is_driver_loaded = False
+            self.input_workers.reset()
+            manager = DriverManager()
+            manager._setup_paths(dll_path=self.dll_path_var.get(), sys_path=self.sys_path_var.get())
+            self.driver_mgr = manager
+            if not manager.initialize():
+                if manager.get_driver() is None:
+                    self.driver_mgr = None
                 self._update_button_states(False)
-                self.driver_status.config(text="驱动状态: 未加载")
-                self.last_check.config(text="上次检查: 未检查")
-        except Exception as e:
-            messagebox.showerror("错误", f"驱动卸载出错: {str(e)}")
-    
+                messagebox.showerror("加载失败", "请检查日志；如仍有会话，可先点击卸载后重试")
+                return False
+            self.input_tester = InputTester(manager.get_driver(), wait=self.input_workers.wait)
+            self.is_driver_loaded = True
+            self._update_button_states(True)
+            self._check_driver_status()
+            return True
+        except Exception as error:
+            self._update_button_states(False)
+            messagebox.showerror("加载失败", str(error))
+            logging.exception("驱动加载失败")
+            return False
+
+    def _unload_driver(self):
+        self._begin_unload()
+
+    def _begin_unload(self, close_after=False):
+        if self.is_unloading:
+            return
+        self.is_unloading = True
+        self.is_closing = close_after
+        self.auto_move_running = False
+        self.rapid_test_running = False
+        self.input_workers.cancel()
+        if self.input_tester:
+            self.input_tester.stop()
+        self._update_button_states(False)
+        self.driver_status.config(text="驱动状态: 正在停止输入并卸载")
+        self._wait_for_workers(time.monotonic() + 5, close_after)
+
+    def _wait_for_workers(self, deadline, close_after):
+        if not self.input_workers.is_idle():
+            if time.monotonic() >= deadline:
+                self._finish_unload(RuntimeError("输入线程尚未退出，未强制卸载；请稍后重试"), close_after)
+            else:
+                self.root.after(25, self._wait_for_workers, deadline, close_after)
+            return
+
+        def cleanup():
+            try:
+                if self.keyboard_hook:
+                    self.keyboard_hook.stop()
+                    self.keyboard_hook = None
+                if self.driver_mgr:
+                    self.driver_mgr.cleanup()
+                self._cleanup_results.put(None)
+            except Exception as error:
+                self._cleanup_results.put(error)
+
+        # SCM may block; never wait for it on the Tk event-loop thread.
+        threading.Thread(target=cleanup, daemon=True).start()
+        self.root.after(25, self._poll_cleanup, close_after)
+
+    def _poll_cleanup(self, close_after):
+        try:
+            result = self._cleanup_results.get_nowait()
+        except queue.Empty:
+            self.root.after(25, self._poll_cleanup, close_after)
+            return
+        self._finish_unload(result, close_after)
+
+    def _finish_unload(self, error, close_after):
+        self.is_unloading = False
+        self.is_driver_loaded = False
+        if error is not None:
+            # Preserve the manager and window for retry; stopped input must not resume.
+            self.is_closing = False
+            self._update_button_states(False)
+            self.driver_status.config(text="驱动状态: 卸载失败，可重试")
+            messagebox.showerror("卸载失败", str(error))
+            return
+        self.driver_mgr = None
+        self.input_tester = None
+        self._update_button_states(False)
+        self.driver_status.config(text="驱动状态: 未加载")
+        self.last_check.config(text="上次检查: 未检查")
+        self.start_hook_btn.config(text="启动热键监听")
+        self.auto_move_status.config(text="状态: 未启动")
+        self.rapid_test_btn.config(text="开始测试")
+        if close_after:
+            self.root.destroy()
+
     def _test_keyboard(self):
         """测试键盘"""
         def run_test():
             try:
                 # 测试一些基本按键
                 logging.info(f"键盘测试3s后开始!")
-                time.sleep(3)
+                self.input_workers.wait(3)
                 test_keys = ['w', 'a', 's', 'd', 'enter']
                 for key in test_keys:
                     logging.info(f"测试按键: {key}")
                     self.input_tester.press_key(key)
-                    time.sleep(0.5)
+                    self.input_workers.wait(0.5)
                 logging.info("键盘测试完成")
+            except WorkCancelled:
+                return
             except Exception as e:
                 logging.error(f"键盘测试出错: {str(e)}")
         
-        threading.Thread(target=run_test, daemon=True).start()
+        self._start_worker(run_test)
     
     def _test_input(self):
         """测试输入固定字符串"""
         def run_test():
             try:
                 logging.info("输入测试3s后开始!")
-                time.sleep(3)
+                self.input_workers.wait(3)
                 test_string = "Hello, World!"
                 logging.info(f"测试输入: {test_string}")
                 
@@ -704,20 +747,22 @@ class CQKeysGUI:
                         self.input_tester.key_up('shift')
                     else:
                         self.input_tester.press_key(char)
-                    time.sleep(0.1)
+                    self.input_workers.wait(0.1)
                 
                 logging.info("输入测试完成")
+            except WorkCancelled:
+                return
             except Exception as e:
                 logging.error(f"输入测试出错: {str(e)}")
         
-        threading.Thread(target=run_test, daemon=True).start()
+        self._start_worker(run_test)
     
     def _test_mouse(self):
         """测试鼠标移动"""
         def run_test():
             try:
                 logging.info("鼠标测试3s后开始!")
-                time.sleep(3)  # 给用户准备时间
+                self.input_workers.wait(3)  # 给用户准备时间
                 
                 # 1. 相对移动测试
                 logging.info("=== 开始相对移动测试 ===")
@@ -733,7 +778,7 @@ class CQKeysGUI:
                 for dx, dy, direction in moves:
                     logging.info(f"测试{direction}移动: ({dx}, {dy})")
                     self.input_tester.mouse_move_rel(dx, dy)
-                    time.sleep(0.5)
+                    self.input_workers.wait(0.5)
                 
                 # 对角线移动测试
                 diag_moves = [
@@ -746,14 +791,14 @@ class CQKeysGUI:
                 for dx, dy, direction in diag_moves:
                     logging.info(f"测试{direction}对角移动: ({dx}, {dy})")
                     self.input_tester.mouse_move_rel(dx, dy)
-                    time.sleep(0.5)
+                    self.input_workers.wait(0.5)
                 
                 # 小距离精确移动测试
                 small_moves = [(5, 0), (0, 5), (-5, 0), (0, -5)]
                 logging.info("测试小距离精确移动")
                 for dx, dy in small_moves:
                     self.input_tester.mouse_move_rel(dx, dy)
-                    time.sleep(0.3)
+                    self.input_workers.wait(0.3)
                 
                 # 2. 绝对移动测试
                 logging.info("\n=== 开始绝对移动测试 ===")
@@ -775,14 +820,14 @@ class CQKeysGUI:
                 for x, y, position in border_points:
                     logging.info(f"测试移动到屏幕{position}: ({x}, {y})")
                     self.input_tester.mouse_move_abs(x, y)
-                    time.sleep(0.8)
+                    self.input_workers.wait(0.8)
                 
                 # 屏幕中心点测试
                 center_x = virtual_x + virtual_width // 2
                 center_y = virtual_y + virtual_height // 2
                 logging.info(f"测试移动到屏幕中心: ({center_x}, {center_y})")
                 self.input_tester.mouse_move_abs(center_x, center_y)
-                time.sleep(0.8)
+                self.input_workers.wait(0.8)
                 
                 # 多显示器测试（如果有）
                 monitor_count = ctypes.windll.user32.GetSystemMetrics(80)  # SM_CMONITORS
@@ -802,8 +847,11 @@ class CQKeysGUI:
                         
                         logging.info(f"测试显示器 工作区域: ({work_area.left}, {work_area.top}, {work_area.right}, {work_area.bottom})")
                         logging.info(f"移动到显示器中心点: ({center_x}, {center_y})")
-                        self.input_tester.mouse_move_abs(center_x, center_y)
-                        time.sleep(0.8)
+                        try:
+                            self.input_tester.mouse_move_abs(center_x, center_y)
+                            self.input_workers.wait(0.8)
+                        except WorkCancelled:
+                            return False
                         
                         return True
                     
@@ -824,33 +872,35 @@ class CQKeysGUI:
                 # 左键测试
                 logging.info("测试左键点击")
                 self.input_tester.mouse_click()
-                time.sleep(0.5)
+                self.input_workers.wait(0.5)
                 
                 # 右键测试
                 logging.info("测试右键点击")
                 self.input_tester.mouse_right_click()
-                time.sleep(0.5)
+                self.input_workers.wait(0.5)
                 
                 # 中键测试
                 logging.info("测试中键点击")
                 self.input_tester.mouse_middle_click()
-                time.sleep(0.5)
+                self.input_workers.wait(0.5)
                 
                 # 额外按键测试
                 logging.info("测试X1按键点击")
                 self.input_tester.mouse_x1_click()
-                time.sleep(0.5)
+                self.input_workers.wait(0.5)
                 
                 logging.info("测试X2按键点击")
                 self.input_tester.mouse_x2_click()
-                time.sleep(0.5)
+                self.input_workers.wait(0.5)
                 
                 logging.info("鼠标测试完成")
                 
+            except WorkCancelled:
+                return
             except Exception as e:
                 logging.error(f"鼠标测试出错: {str(e)}")
         
-        threading.Thread(target=run_test, daemon=True).start()
+        self._start_worker(run_test)
     
     def _on_input_submit(self, event):
         """处理Enter键提交事件"""
@@ -895,17 +945,19 @@ class CQKeysGUI:
                     result += char
                     # 更新输出框
                     self.root.after(0, self._update_output, result)
-                    time.sleep(0.05)  # 适当的延迟
+                    self.input_workers.wait(0.05)  # 适当的延迟
                 
                 logging.info("文本发送完成")
                 # 清空输入框
                 self.root.after(0, self.input_entry.delete, 0, tk.END)
                 
+            except WorkCancelled:
+                return
             except Exception as e:
                 logging.error(f"发送文本出错: {str(e)}")
         
         # 在新线程中执行发送操作
-        threading.Thread(target=send_text, daemon=True).start()
+        self._start_worker(send_text)
 
     def _update_output(self, text):
         """更新输出框的文本"""
@@ -948,10 +1000,12 @@ class CQKeysGUI:
                         text=f"上次检查: {time_str}"))
                 
                 logging.info(f"驱动状态: {self._get_status_text(driver_status)}")
+            except WorkCancelled:
+                return
             except Exception as e:
                 logging.error(f"检查驱动状态出错: {str(e)}")
         
-        threading.Thread(target=check, daemon=True).start()
+        self._start_worker(check)
     
     def create_path_frame(self, parent=None):
         """创建路径配置区域
@@ -1062,30 +1116,8 @@ class CQKeysGUI:
             logging.error(f"加载配置失败: {str(e)}")
     
     def initialize_driver(self):
-        """初始化驱动"""
-        try:
-            dll_path = self.dll_path_var.get()
-            sys_path = self.sys_path_var.get()
-            
-            if not dll_path or not sys_path:
-                logging.error("请先设置DLL和SYS文件路径！")
-                return False
-            
-            self.driver_mgr = DriverManager()
-            self.driver_mgr._setup_paths(dll_path=dll_path, sys_path=sys_path)
-            
-            if self.driver_mgr.initialize():
-                self.input_tester = InputTester(self.driver_mgr.get_driver())
-                logging.info("驱动初始化成功！")
-                return True
-            else:
-                messagebox.showerror("错误", "驱动初始化失败！")
-                return False
-                
-        except Exception as e:
-            messagebox.showerror("错误", f"驱动初始化失败: {str(e)}")
-            return False
-    
+        return self._load_driver()
+
     def run(self):
         """运行GUI"""
         self.root.mainloop()
@@ -1147,12 +1179,9 @@ class CQKeysGUI:
                 self.rapid_test_running = True
                 
                 # 启动测试线程
-                self.rapid_test_thread = threading.Thread(
-                    target=self._run_rapid_test,
-                    args=(test_key, press_time/1000.0, interval_time/1000.0),
-                    daemon=True
-                )
-                self.rapid_test_thread.start()
+                self.rapid_test_thread = self._start_worker(
+                    self._run_rapid_test,
+                    (test_key, press_time/1000.0, interval_time/1000.0))
                 
             except ValueError:
                 messagebox.showerror("错误", "请输入有效的时间间隔！")
@@ -1214,7 +1243,7 @@ class CQKeysGUI:
                 
                 # 使用高精度计时器等待按下时间
                 while time.perf_counter() - current_time < press_time:
-                    pass
+                    self.input_workers.check_cancelled()
                 
                 # 释放按键
                 if not self.input_tester.key_up(key):
@@ -1226,8 +1255,10 @@ class CQKeysGUI:
                 
                 # 使用高精度计时器等待间隔时间
                 while time.perf_counter() - current_time < (press_time + interval_time):
-                    pass
+                    self.input_workers.check_cancelled()
                 
+        except WorkCancelled:
+            return
         except Exception as e:
             self.rapid_test_running = False
             error_msg = f"高频按键测试出错: {str(e)}"
@@ -1348,14 +1379,14 @@ class CQKeysGUI:
                 logging.info(f"移动鼠标到测试位置: ({test_x}, {test_y})")
                 if not self.input_tester.mouse_move_abs(test_x, test_y):
                     raise Exception("鼠标移动失败")
-                time.sleep(1)  # 等待移动完成
+                self.input_workers.wait(1)  # 等待移动完成
 
                 # 根据按钮类型执行不同的测试
                 if button == "left":
                     logging.info("测试左键点击 - 请观察鼠标位置的选择效果")
                     # 双击测试
                     self.input_tester.mouse_click(duration=0.1)
-                    time.sleep(0.1)
+                    self.input_workers.wait(0.1)
                     self.input_tester.mouse_click(duration=0.1)
                     
                 elif button == "right":
@@ -1367,7 +1398,7 @@ class CQKeysGUI:
                     test_y = screen_height // 8
                     logging.info(f"移动鼠标到标签栏位置: ({test_x}, {test_y})")
                     self.input_tester.mouse_move_abs(test_x, test_y)
-                    time.sleep(1)
+                    self.input_workers.wait(1)
                     
                     logging.info("测试中键点击 - 如果在浏览器中，应该会打开新标签页")
                     self.input_tester.mouse_middle_click()
@@ -1382,12 +1413,14 @@ class CQKeysGUI:
 
                 logging.info(f"{button}键测试完成")
                     
+            except WorkCancelled:
+                return
             except Exception as e:
                 logging.error(f"鼠标点击测试出错: {str(e)}")
                 messagebox.showerror("错误", f"鼠标点击测试出错: {str(e)}")
 
         # 在新线程中运行测试
-        threading.Thread(target=run_test, daemon=True).start()
+        self._start_worker(run_test)
 
     def _test_mouse_wheel(self, direction: str) -> None:
         """测试鼠标滚轮
@@ -1422,7 +1455,7 @@ class CQKeysGUI:
 
                 # 添加3秒延时
                 logging.info("滚轮测试将在3秒后开始...")
-                time.sleep(3)
+                self.input_workers.wait(3)
                     
                 # 根据方向调用相应函数
                 if direction == "up":
@@ -1443,12 +1476,14 @@ class CQKeysGUI:
             except ValueError as ve:
                 logging.error(f"数值转换错误: {str(ve)}")
                 messagebox.showerror("错误", "请输入有效的滚动量数值")
+            except WorkCancelled:
+                return
             except Exception as e:
                 logging.error(f"鼠标滚轮测试出错: {str(e)}")
                 messagebox.showerror("错误", f"鼠标滚轮测试出错: {str(e)}")
 
         # 使用新线程运行滚轮测试，避免阻塞GUI
-        threading.Thread(target=run_test, daemon=True).start()
+        self._start_worker(run_test)
 
     def _move_to_corner(self, corner: str) -> None:
         """移动鼠标到主显示器的四角
@@ -1488,12 +1523,14 @@ class CQKeysGUI:
                 logging.info(f"移动鼠标到主显示器{corner_name}: ({target_x}, {target_y})")
                 self.input_tester.mouse_move_abs(target_x, target_y)
 
+            except WorkCancelled:
+                return
             except Exception as e:
                 logging.error(f"移动到{corner_name}失败: {str(e)}")
                 messagebox.showerror("错误", f"移动到{corner_name}失败: {str(e)}")
 
         # 在新线程中运行移动操作
-        threading.Thread(target=run_move, daemon=True).start()
+        self._start_worker(run_move)
 
     def _test_smooth_move_rel(self, direction: str) -> None:
         """测试相对平滑移动
@@ -1534,24 +1571,26 @@ class CQKeysGUI:
                 step_x = dx / STEPS
                 step_y = dy / STEPS
                 
-                time.sleep(3)
+                self.input_workers.wait(3)
                 logging.info("3秒后开始移动")
                 
                 for _ in range(STEPS):
                     self.input_tester.mouse_move_rel(int(step_x), int(step_y))
-                    time.sleep(0.02)  # 20ms的延迟使移动更平滑
+                    self.input_workers.wait(0.02)  # 20ms的延迟使移动更平滑
                     
                 logging.info("相对平滑移动完成")
 
             except ValueError as ve:
                 logging.error(f"数值转换错误: {str(ve)}")
                 messagebox.showerror("错误", "请输入有效的移动距离")
+            except WorkCancelled:
+                return
             except Exception as e:
                 logging.error(f"相对平滑移动测试出错: {str(e)}")
                 messagebox.showerror("错误", f"相对平滑移动测试出错: {str(e)}")
 
         # 在新线程中运行测试
-        threading.Thread(target=run_test, daemon=True).start()
+        self._start_worker(run_test)
 
     def _test_smooth_move_abs(self) -> None:
         """测试绝对平滑移动"""
@@ -1588,22 +1627,26 @@ class CQKeysGUI:
                     current_y = int(start_y + dy * eased_progress)
                     
                     self.input_tester.mouse_move_abs(current_x, current_y)
-                    time.sleep(0.01)  # 10ms的延迟使移动更平滑
+                    self.input_workers.wait(0.01)  # 10ms的延迟使移动更平滑
                     
                 logging.info("绝对平滑移动完成")
 
             except ValueError as ve:
                 logging.error(f"数值转换错误: {str(ve)}")
                 messagebox.showerror("错误", "请输入有效的坐标值")
+            except WorkCancelled:
+                return
             except Exception as e:
                 logging.error(f"绝对平滑移动测试出错: {str(e)}")
                 messagebox.showerror("错误", f"绝对平滑移动测试出错: {str(e)}")
 
         # 在新线程中运行测试
-        threading.Thread(target=run_test, daemon=True).start()
+        self._start_worker(run_test)
 
     def _toggle_keyboard_hook(self):
         """切换键盘钩子状态"""
+        if self.is_unloading or self.is_closing:
+            return
         if not self.keyboard_hook:
             try:
                 # 创建并启动键盘钩子
@@ -1616,7 +1659,7 @@ class CQKeysGUI:
                     messagebox.showerror("错误", f"无效的热键: {hotkey}")
                     return
                     
-                self.keyboard_hook.register_hotkey(vk_code, self._toggle_auto_move)
+                self.keyboard_hook.register_hotkey(vk_code, lambda: self.root.after(0, self._toggle_auto_move))
                 self.keyboard_hook.start()
                 
                 # 更新UI
@@ -1625,7 +1668,8 @@ class CQKeysGUI:
                 
             except Exception as e:
                 messagebox.showerror("错误", f"启动键盘钩子失败: {str(e)}")
-                self.keyboard_hook = None
+                # Retain the object until stop() confirms its native thread exited.
+                self.start_hook_btn.config(text="停止热键监听")
                 
         else:
             try:
@@ -1645,6 +1689,8 @@ class CQKeysGUI:
 
     def _toggle_auto_move(self):
         """切换自动移动状态"""
+        if self.is_unloading or self.is_closing:
+            return
         if not self.is_driver_loaded or not self.input_tester:
             messagebox.showerror("错误", "请先加载驱动")
             return
@@ -1664,9 +1710,7 @@ class CQKeysGUI:
                 self.auto_move_status.config(text="状态: 自动移动中")
                 
                 # 在新线程中运行自动移动
-                threading.Thread(target=self._run_auto_move,
-                              args=(speed, move_range),
-                              daemon=True).start()
+                self._start_worker(self._run_auto_move, (speed, move_range))
                 
             except ValueError:
                 messagebox.showerror("错误", "请输入有效的数值")
@@ -1728,12 +1772,16 @@ class CQKeysGUI:
                         angle -= 2 * math.pi
                     
                     # 增加延迟以减缓移动速度
-                    time.sleep(0.016)  # 约60fps的更新率
+                    self.input_workers.wait(0.016)  # 约60fps的更新率
                     
+                except WorkCancelled:
+                    return
                 except Exception as e:
                     logging.error(f"自动移动出错: {str(e)}")
-                    time.sleep(0.1)  # 出错时等待较长时间
+                    self.input_workers.wait(0.1)  # 出错时等待较长时间
                     
+        except WorkCancelled:
+            return
         except Exception as e:
             logging.error(f"自动移动线程出错: {str(e)}")
             self.auto_move_running = False

@@ -37,7 +37,6 @@
   <ItemGroup>
     <Reference Include="System" />
     <Reference Include="System.Data" />
-    <Reference Include="System.Security.Principal.Windows" />
     <Reference Include="System.ServiceProcess" />
     <Reference Include="System.Xml" />
     <Reference Include="Microsoft.CSharp" />
@@ -101,8 +100,18 @@
     <Compile Include="DriverService.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="dll\**\*.*">
+    <Content Include="dll\**\*.*" Exclude="dll\cqkeysdll.dll">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+  <PropertyGroup>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="dll\cqkeysdll.dll" Condition="Exists('dll\cqkeysdll.dll')">
+      <TargetPath>cqkeysdll.dll</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />

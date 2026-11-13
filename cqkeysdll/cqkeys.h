@@ -11,7 +11,10 @@
 #else
 #define CQKEYSDLL_API __declspec(dllimport)
 #endif
-extern "C" CQKEYSDLL_API BOOL StopInputProcessing();
+// Runtime lifecycle ABI v1. FALSE reports a Win32 error via GetLastError.
+extern "C" CQKEYSDLL_API DWORD __cdecl GetLifecycleVersion();
+extern "C" CQKEYSDLL_API BOOL __cdecl StopInputProcessing();
+extern "C" CQKEYSDLL_API BOOL __cdecl StopNTDriver(char* name);
 
 
 #ifndef CTL_CODE
