@@ -39,7 +39,7 @@ DLL 输出：`cqkeysdll/x64/Debug/cqkeysdll.dll`。
 
 ## 使用
 
-1. 在获授权的隔离测试机准备正确签名且受信任的完整驱动包。不要在日常主机上调试内核驱动。
+1. 在目标 Windows 系统上准备正确签名且受信任的完整驱动包。内核故障可能导致蓝屏和业务中断，建议先在隔离环境验证。
 2. 使用同次构建的 DLL 和驱动包；`GetLifecycleVersion()` 必须为 `2`。
 3. 管理员进程调用 `LoadNTDriver("cqkeys", infPath)`，再调用 `SetHandle()`。
    DLL 经 SetupAPI 创建固定的根枚举 PnP 节点并安装所选 INF。
@@ -51,6 +51,9 @@ DLL 输出：`cqkeysdll/x64/Debug/cqkeysdll.dll`。
 Python 测试工具位于 `cqkeyspy_test/`，C# 管理器为 `cqkeys_csharp/CqKeys.csproj`。
 在 Python GUI 的 SYS 选择框中选择完整包内的 `cqkeys.sys`；DLL 使用同目录同名 INF
 执行安装，缺失时报错。PnP 服务名为 `cqkeysVhf`。源码仓库不分发编译后的 DLL、SYS 或 CAT。
+
+Python 命令行演示位于 [`example/python/demo.py`](example/python/demo.py)，默认检查连接状态并在退出时禁用设备，
+可显式选择键盘、鼠标或媒体键测试，运行方法见 [演示说明](example/python/README.md)。
 
 ### 行为边界
 
