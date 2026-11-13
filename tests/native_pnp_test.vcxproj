@@ -11,7 +11,7 @@
   <PropertyGroup><OutDir>$(ProjectDir)bin\$(Configuration)\</OutDir><IntDir>$(ProjectDir)obj\pnp\$(Configuration)\</IntDir></PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><LanguageStandard>stdcpp17</LanguageStandard><AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions><WarningLevel>Level4</WarningLevel><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <Link><AdditionalDependencies>advapi32.lib;cfgmgr32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><AdditionalDependencies>advapi32.lib;cfgmgr32.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="native_pnp_test.cpp" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

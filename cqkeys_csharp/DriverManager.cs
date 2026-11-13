@@ -17,6 +17,17 @@ namespace CqKeys
         private bool disposed;
         public bool NeedsCleanup => needsCleanup;
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DriverStartResult
+        {
+            public uint Size;
+            public uint Version;
+            public uint Error;
+            public uint ProblemCode;
+            public int ProblemStatus;
+            public uint DiagnosticError;
+        }
+
         private static class Native
         {
             [DllImport("cqkeysdll.dll", CallingConvention = CallingConvention.Cdecl)]
@@ -27,6 +38,11 @@ namespace CqKeys
             [DefaultDllImportSearchPaths(DllImportSearchPath.AssemblyDirectory | DllImportSearchPath.System32)]
             [return: MarshalAs(UnmanagedType.Bool)]
             internal static extern bool LoadNTDriver(string name, string path);
+
+            [DllImport("cqkeysdll.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
+            [DefaultDllImportSearchPaths(DllImportSearchPath.AssemblyDirectory | DllImportSearchPath.System32)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            internal static extern bool GetLastDriverStartResult(ref DriverStartResult result);
 
             [DllImport("cqkeysdll.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
             [DefaultDllImportSearchPaths(DllImportSearchPath.AssemblyDirectory | DllImportSearchPath.System32)]
@@ -70,7 +86,7 @@ namespace CqKeys
                     if (!Native.LoadNTDriver(driverName, Path.GetFullPath(driverPath)))
                     {
                         int error = Marshal.GetLastWin32Error();
-                        throw CreateDriverException(error, "LoadNTDriver 驱动启动失败");
+                        throw ReadDriverStartException(error);
                     }
                     if (!Native.SetHandle())
                         throw CreateDriverException(Marshal.GetLastWin32Error(), "SetHandle 连接驱动设备失败");
@@ -112,6 +128,43 @@ namespace CqKeys
                 disposed = true;
             }
             finally { operations.Release(); }
+        }
+
+        private static Win32Exception ReadDriverStartException(int error)
+        {
+            var result = new DriverStartResult { Size = (uint)Marshal.SizeOf(typeof(DriverStartResult)), Version = 1 };
+            try
+            {
+                if (!Native.GetLastDriverStartResult(ref result))
+                    result.DiagnosticError = unchecked((uint)Marshal.GetLastWin32Error());
+            }
+            catch (EntryPointNotFoundException)
+            {
+                string message = CreateDriverException(error, "LoadNTDriver 驱动启动失败").Message;
+                return new Win32Exception(error, message + " 当前 DLL 缺少启动诊断接口，请同步更新 cqkeysdll.dll。");
+            }
+            return CreateDriverStartException(error, result);
+        }
+
+        private static Win32Exception CreateDriverStartException(int error, DriverStartResult result)
+        {
+            string message = CreateDriverException(error, "LoadNTDriver 驱动启动失败").Message;
+            if (result.ProblemCode != 0)
+            {
+                message += $" PnP Problem Code {result.ProblemCode}（0x{result.ProblemCode:X8}）。";
+                if (result.DiagnosticError == 0)
+                    message += $" Problem Status 0x{result.ProblemStatus:X8}。";
+            }
+            if (result.DiagnosticError != 0)
+            {
+                int queryError = unchecked((int)result.DiagnosticError);
+                message += $" 设备诊断查询失败（Win32 {queryError}, 0x{queryError:X8}）：{new Win32Exception(queryError).Message}";
+            }
+            else if (result.ProblemCode != 0 && result.ProblemStatus == unchecked((int)0xC0000603))
+            {
+                message += " STATUS_IMAGE_CERT_REVOKED：Windows 按吊销策略阻止加载该驱动。请使用有效且符合内核签名策略的完整驱动包；延长等待时间不能解决。";
+            }
+            return new Win32Exception(error, message);
         }
 
         private static Win32Exception CreateDriverException(int error, string operation)

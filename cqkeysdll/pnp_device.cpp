@@ -1,8 +1,12 @@
 #include "pch.h"
 #include "pnp_device.h"
+#include "cqkeys.h"
 #include "../shared/cqkeys_protocol.h"
 #include <setupapi.h>
 #include <cfgmgr32.h>
+#include <initguid.h>
+#include <devpkey.h>
+#include <winternl.h>
 #include <newdev.h>
 #include <sddl.h>
 #include <string>
@@ -66,6 +70,37 @@ namespace {
         if (!SetupDiSetClassInstallParamsW(devices, &device, &parameters.ClassInstallHeader, sizeof(parameters)) ||
             !SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, devices, &device)) return FALSE;
         return CheckRestart(devices, device);
+    }
+
+    BOOL CheckStartProblem(DEVINST instance, CqDriverStartResult& diagnostics) {
+        ULONG flags = 0, problem = 0;
+        CONFIGRET result = CM_Get_DevNode_Status(&flags, &problem, instance, 0);
+        if (result != CR_SUCCESS) {
+            diagnostics.diagnosticError = CM_MapCrToWin32Err(result, ERROR_GEN_FAILURE);
+            return Error(diagnostics.diagnosticError);
+        }
+        if (!(flags & DN_HAS_PROBLEM)) return TRUE;
+        diagnostics.problemCode = problem;
+        LONG status = 0;
+        DEVPROPTYPE type = 0;
+        ULONG bytes = sizeof(status);
+        result = CM_Get_DevNode_PropertyW(instance, &DEVPKEY_Device_ProblemStatus, &type,
+            reinterpret_cast<PBYTE>(&status), &bytes, 0);
+        if (result == CR_SUCCESS) {
+            if (type != DEVPROP_TYPE_NTSTATUS || bytes != sizeof(status)) {
+                diagnostics.diagnosticError = ERROR_INVALID_DATA;
+                return Error(ERROR_INVALID_DATA);
+            }
+            diagnostics.problemStatus = status;
+        } else {
+            diagnostics.diagnosticError = CM_MapCrToWin32Err(result, ERROR_GEN_FAILURE);
+            if (result != CR_NO_SUCH_VALUE) return Error(diagnostics.diagnosticError);
+        }
+        if (problem == CM_PROB_NEED_RESTART) return Error(ERROR_SUCCESS_REBOOT_REQUIRED);
+        if (status < 0) return Error(RtlNtStatusToDosError(status));
+        if (problem == CM_PROB_UNSIGNED_DRIVER) return Error(ERROR_INVALID_IMAGE_HASH);
+        if (problem == CM_PROB_DISABLED) return Error(ERROR_SERVICE_DISABLED);
+        return Error(ERROR_GEN_FAILURE);
     }
 
     BOOL PackagePath(const char* path, std::wstring& result) {
@@ -141,7 +176,10 @@ HANDLE CqOpenInterface() try {
     return INVALID_HANDLE_VALUE;
 }
 
-BOOL CqInstallDevice(const char* path) try {
+BOOL CqInstallDevice(const char* path, CqDriverStartResult* diagnostics) try {
+    CqDriverStartResult local{sizeof(CqDriverStartResult), CQ_DRIVER_START_RESULT_ABI};
+    if (!diagnostics) diagnostics = &local;
+    *diagnostics = local;
     std::wstring infPath;
     if (!PackagePath(path, infPath)) return FALSE;
     if (!CheckNoOpenSession()) return FALSE;
@@ -176,7 +214,7 @@ BOOL CqInstallDevice(const char* path) try {
     if (reboot) return Error(ERROR_SUCCESS_REBOOT_REQUIRED);
     if (!ChangeState(devices.value, device, DICS_ENABLE)) return FALSE;
     const ULONGLONG start = GetTickCount64();
-    while (GetTickCount64() - start < 5000) {
+    for (;;) {
         HANDLE handle = CqOpenInterface();
         if (handle != INVALID_HANDLE_VALUE) {
             if (!CloseHandle(handle)) return FALSE;
@@ -186,9 +224,10 @@ BOOL CqInstallDevice(const char* path) try {
         DWORD error = GetLastError();
         if (error != ERROR_FILE_NOT_FOUND && error != ERROR_NO_SUCH_DEVINST &&
             error != ERROR_NO_MORE_ITEMS && error != ERROR_NOT_READY) return FALSE;
+        if (!CheckStartProblem(device.DevInst, *diagnostics)) return FALSE;
+        if (GetTickCount64() - start >= 5000) return Error(ERROR_TIMEOUT);
         Sleep(50);
     }
-    return Error(ERROR_TIMEOUT);
 } catch (const std::bad_alloc&) {
     return Error(ERROR_NOT_ENOUGH_MEMORY);
 }

@@ -157,6 +157,35 @@ Load/Stop/Unload 仍显式管理固定节点。只连接已启用设备可调用
 Stop 禁用节点，Unload 移除节点，二者均保留包；没有管理会话的清理不操作其他客户端设备。
 驱动包和签名策略由部署流程管理，客户端不会自动关闭安全机制、导入信任或批量清包。
 
+### 启动失败诊断
+
+驱动包安装成功不等于设备已成功启动。`LoadNTDriver` 在启用固定节点后等待接口，
+每次接口尚未出现时通过 `CM_Get_DevNode_Status` 检查 `DN_HAS_PROBLEM`，并读取
+`DEVPKEY_Device_ProblemStatus`。已报告的失败立即返回，不再统一等待 5 秒后报 1460；
+到达等待期限时也检查设备状态。未报告设备问题且接口一直不出现时仍返回 `ERROR_TIMEOUT`。
+
+- 失败 NTSTATUS 通过系统 `RtlNtStatusToDosError` 转换，保留原有 `GetLastError` 调用约定。
+  例如 `0xC0000603 (STATUS_IMAGE_CERT_REVOKED)` 映射为 `0x800B010C (CERT_E_REVOKED)`，
+  C# 的有符号整数显示为 `-2146762484`，并保留完整十六进制值。
+- `CM_PROB_NEED_RESTART` 返回 3010，不自动重启；没有可用失败 NTSTATUS 时按已知 Problem Code
+  报告重启、未签名或禁用，否则返回 `ERROR_GEN_FAILURE`，不把缺少详细原因当作成功。
+- 查询失败或属性类型/长度错误显式返回错误。可选 Problem Status 不存在时，仍报告已知的
+  Problem Code，并在诊断中记录属性查询失败；未知 NTSTATUS 保留原值和系统转换结果（无映射时通常为 317，自定义状态可能直接透传）。
+
+新增可选导出 `BOOL __cdecl GetLastDriverStartResult(CqDriverStartResult* result)`，生命周期 ABI 仍为 2。
+结构为 24 字节：`size:u32 / version:u32 / error:u32 / problemCode:u32 / problemStatus:i32 / diagnosticError:u32`。
+调用方先设置 `size=sizeof(CqDriverStartResult)`、`version=CQ_DRIVER_START_RESULT_ABI (1)`。
+在调用 `LoadNTDriver` 的同一线程立即读取：`error` 为本次启动的系统错误，`problemCode` 为 PnP 问题码，
+`problemStatus` 为原始 NTSTATUS；`diagnosticError` 非零表示诊断查询未完成，不能把零状态解释为成功。
+未发现问题时 `problemCode=0`；每次 Load（包括参数或租约检查失败）都会清空上次诊断，
+其他线程和清理操作不覆盖本线程快照。成功读取快照不修改原生调用线程进入该函数时的 LastError 或兼容错误码。
+托管运行时可能在 P/Invoke 前重置错误缓存，因此 C# 必须先保存 `Marshal.GetLastWin32Error()`，再读取快照。
+
+C# 在安装工作线程上读取并显示 Problem Code/Status；确认 `0xC0000603` 时提示 Windows 吊销拦截，
+而不是推测等待不足。应同步部署新 C# 程序和新 DLL（DLL 放在 EXE 同目录）；旧 DLL 缺少该导出时，
+C# 保留原始安装错误并明确提示更新 DLL，不伪造诊断结果。旧客户端无需调用新增导出，仍可读取改进后的系统错误。
+本改动不解除签名拦截，也不要求修改 SYS；真正恢复加载仍需符合内核签名策略的完整 INF/SYS/CAT 包。
+
 ## 验证层级
 
 ### 不接触真实设备的本地检查
@@ -165,6 +194,7 @@ Stop 禁用节点，Unload 移除节点，二者均保留包；没有管理会�
 - 真实生产状态核心：成功后才更新状态、全部清理失败组合、逐项重试、停止终态和旧代际不可复活。
 - 真实 DLL 代码加可控 Win32 I/O/PnP 边界：挂起完成、取消竞争、部分移动、错误保留、并发停止、关闭失败重试。
 - DLL 任务：仲裁、取消等待、持键释放、结果保留和显式运行时清理；Python 薄绑定和 GUI 停止顺序。
+- 启动诊断：吊销/其他 NTSTATUS、缺失或畸形属性、查询失败、延迟枚举、真正超时及期限边界；快照 ABI、线程隔离、重试清空与 C# 原始错误展示。
 - 配套工具齐备时编译 Debug/Release x64 DLL、SYS、C#；可用 SignMode=Off 做未签名构建检查，不安装产物。
 
 这些检查不能证明真实 WDF 取消、ACL、HID 接收、设备枚举、电源恢复或签名信任已通过。
@@ -192,6 +222,9 @@ Driver Verifier、KMDF 验证、调试器和电源测试只在另行授权的隔
 
 ## 官方依据
 
+- [CM_Get_DevNode_Status](https://learn.microsoft.com/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_devnode_status)
+- [CM_Get_DevNode_PropertyW](https://learn.microsoft.com/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_devnode_propertyw)
+- [RtlNtStatusToDosError](https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-rtlntstatustodoserror)
 - [VHF 提交、默认缓冲与删除](https://learn.microsoft.com/windows-hardware/drivers/hid/virtual-hid-framework--vhf-)
 - [WDF 请求取消](https://learn.microsoft.com/windows-hardware/drivers/wdf/canceling-i-o-requests)
 - [电源管理队列](https://learn.microsoft.com/windows-hardware/drivers/wdf/using-power-managed-i-o-queues)

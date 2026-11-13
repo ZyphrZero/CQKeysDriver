@@ -44,6 +44,10 @@ enum : uint32_t {
 };
 
 enum : uint32_t {
+    CQ_DRIVER_START_RESULT_ABI = 1
+};
+
+enum : uint32_t {
     CQ_INPUT_RESULT_ABI = 1,
     CQ_INPUT_RESULT_PARTIAL = 1,
     CQ_INPUT_RESULT_UNCERTAIN = 2,
@@ -51,6 +55,15 @@ enum : uint32_t {
 };
 
 #pragma pack(push, 8)
+struct CqDriverStartResult {
+    uint32_t size;
+    uint32_t version;
+    uint32_t error;
+    uint32_t problemCode;
+    int32_t problemStatus;
+    uint32_t diagnosticError;
+};
+
 struct CqInputAction {
     uint32_t type;
     int32_t value1;
@@ -91,6 +104,8 @@ struct CqInputTaskResult {
 };
 #pragma pack(pop)
 
+static_assert(sizeof(CqDriverStartResult) == 24 && offsetof(CqDriverStartResult, problemStatus) == 16,
+    "Driver start result ABI");
 static_assert(sizeof(CqInputAction) == 16, "Input action ABI");
 static_assert(sizeof(CqInputResult) == 48, "Input result ABI");
 static_assert(sizeof(CqInputTaskResult) == 96 && offsetof(CqInputTaskResult, taskId) == 16 &&
@@ -110,6 +125,7 @@ CQKEYSDLL_API BOOL __cdecl QueryInputTask(uint64_t taskId, CqInputTaskResult* re
 CQKEYSDLL_API BOOL __cdecl ReleaseInputTask(uint64_t taskId);
 CQKEYSDLL_API BOOL __cdecl CleanupInputRuntime();
 CQKEYSDLL_API BOOL __cdecl LoadNTDriver(const char* name, const char* path);
+CQKEYSDLL_API BOOL __cdecl GetLastDriverStartResult(CqDriverStartResult* result);
 CQKEYSDLL_API BOOL __cdecl StopNTDriver(const char* name);
 CQKEYSDLL_API BOOL __cdecl UnloadNTDriver(const char* name);
 CQKEYSDLL_API BOOL __cdecl SetHandle();

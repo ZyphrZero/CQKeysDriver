@@ -3,6 +3,7 @@
 #include "../shared/cqkeys_protocol.h"
 #include <setupapi.h>
 #include <cfgmgr32.h>
+#include <devpkey.h>
 #include <newdev.h>
 #include <sddl.h>
 #include <string>
@@ -38,6 +39,13 @@ namespace fake {
     DWORD state = 0, installFlags = 0;
     int creations = 0, installs = 0, copies = 0;
     ULONGLONG ticks = 0;
+    ULONGLONG interfaceReadyAt = 0, problemAt = 0;
+    ULONG startProblem = 0;
+    LONG problemStatus = 0;
+    CONFIGRET statusError = CR_SUCCESS, propertyError = CR_SUCCESS;
+    DEVPROPTYPE problemType = DEVPROP_TYPE_NTSTATUS;
+    ULONG problemSize = sizeof(LONG);
+    int statusQueries = 0, propertyQueries = 0;
     std::wstring inspectedPath;
     const GUID systemClass = {0x4d36e97d, 0xe325, 0x11ce, {0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}};
     BOOL error(DWORD value) { SetLastError(value); return FALSE; }
@@ -46,6 +54,11 @@ namespace fake {
         failLeaseClose = false;
         openError = copyError = selectError = installError = removeError = state = installFlags = 0;
         creations = installs = copies = 0; ticks = 0; inspectedPath.clear();
+        interfaceReadyAt = problemAt = 0;
+        startProblem = 0; problemStatus = 0;
+        statusError = propertyError = CR_SUCCESS;
+        problemType = DEVPROP_TYPE_NTSTATUS; problemSize = sizeof(LONG);
+        statusQueries = propertyQueries = 0;
     }
     DWORD WINAPI attributes(LPCWSTR path) { inspectedPath = path; return FILE_ATTRIBUTE_NORMAL; }
     BOOL WINAPI infClass(LPCWSTR, LPGUID result, PWSTR name, DWORD, PDWORD) {
@@ -120,7 +133,8 @@ namespace fake {
         *reboot = restart; enabled = true; return TRUE;
     }
     BOOL WINAPI enumInterface(HDEVINFO, PSP_DEVINFO_DATA, const GUID*, DWORD, PSP_DEVICE_INTERFACE_DATA) {
-        return enabled ? TRUE : error(ERROR_NO_MORE_ITEMS);
+        return enabled && ticks >= interfaceReadyAt && (!startProblem || ticks < problemAt)
+            ? TRUE : error(ERROR_NO_MORE_ITEMS);
     }
     BOOL WINAPI interfaceDetail(HDEVINFO, PSP_DEVICE_INTERFACE_DATA, PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail,
                                DWORD, PDWORD required, PSP_DEVINFO_DATA) {
@@ -141,8 +155,24 @@ namespace fake {
         return TRUE;
     }
     CONFIGRET WINAPI status(PULONG flags, PULONG problem, DEVINST, ULONG) {
+        ++statusQueries;
+        if (statusError != CR_SUCCESS) return statusError;
+        if (enabled && startProblem && ticks >= problemAt) {
+            *flags = DN_HAS_PROBLEM; *problem = startProblem;
+            return CR_SUCCESS;
+        }
         *flags = enabled ? DN_STARTED : DN_HAS_PROBLEM;
         *problem = enabled ? 0 : CM_PROB_DISABLED;
+        return CR_SUCCESS;
+    }
+    CONFIGRET WINAPI devNodeProperty(DEVINST instance, const DEVPROPKEY* key, DEVPROPTYPE* type,
+                                     PBYTE buffer, PULONG size, ULONG flags) {
+        ++propertyQueries;
+        if (instance != 42 || !IsEqualDevPropKey(*key, DEVPKEY_Device_ProblemStatus) || flags ||
+            *size != sizeof(problemStatus)) return CR_INVALID_DATA;
+        if (propertyError != CR_SUCCESS) return propertyError;
+        *type = problemType; *size = problemSize;
+        memcpy(buffer, &problemStatus, sizeof(problemStatus));
         return CR_SUCCESS;
     }
     BOOL WINAPI uninstall(HWND, HDEVINFO, PSP_DEVINFO_DATA, DWORD, PBOOL reboot) {
@@ -182,6 +212,7 @@ namespace fake {
 #define CreateFileW fake::openFile
 #define CloseHandle fake::close
 #define CM_Get_DevNode_Status fake::status
+#define CM_Get_DevNode_PropertyW fake::devNodeProperty
 #define DiUninstallDevice fake::uninstall
 #define CM_Locate_DevNodeW fake::locate
 #define GetTickCount64 fake::clock
@@ -264,6 +295,67 @@ int main() {
     check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == ERROR_SUCCESS_REBOOT_REQUIRED, "installation restart is explicit");
     check(!CqChangeDevice(false) && GetLastError() == ERROR_SUCCESS_REBOOT_REQUIRED, "disable restart is explicit");
     check(!CqChangeDevice(true) && GetLastError() == ERROR_SUCCESS_REBOOT_REQUIRED, "removal restart is explicit");
+
+    fake::reset(); fake::startProblem = CM_PROB_DRIVER_FAILED_LOAD;
+    fake::problemStatus = static_cast<LONG>(0xC0000603);
+    CqDriverStartResult diagnostics{};
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf", &diagnostics) && GetLastError() == static_cast<DWORD>(CERT_E_REVOKED),
+        "revoked driver returns the real NTSTATUS mapping instead of timeout");
+    check(diagnostics.problemCode == CM_PROB_DRIVER_FAILED_LOAD &&
+        diagnostics.problemStatus == static_cast<LONG>(0xC0000603) && !diagnostics.diagnosticError,
+        "raw problem code and NTSTATUS are preserved for callers");
+    check(fake::ticks == 0 && fake::statusQueries == 1 && fake::propertyQueries == 1,
+        "terminal load failure is detected without waiting five seconds");
+    fake::reset(); fake::interfaceReadyAt = 150;
+    check(CqInstallDevice("C:\\test\\cqkeys.inf", &diagnostics) && fake::ticks == 150 && GetLastError() == ERROR_SUCCESS,
+        "interface startup without a device problem can still complete asynchronously");
+    check(!diagnostics.problemCode && !diagnostics.problemStatus && !diagnostics.diagnosticError,
+        "a successful retry does not reuse stale startup diagnostics");
+    fake::reset(); fake::interfaceReadyAt = 6000;
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == ERROR_TIMEOUT && fake::ticks == 5000,
+        "timeout remains reserved for an interface that never appears without a reported problem");
+    fake::reset(); fake::interfaceReadyAt = 6000; fake::problemAt = 5000;
+    fake::startProblem = CM_PROB_DRIVER_FAILED_LOAD; fake::problemStatus = static_cast<LONG>(0xC0000603);
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == static_cast<DWORD>(CERT_E_REVOKED),
+        "a failure at the timeout boundary is not overwritten by ERROR_TIMEOUT");
+    fake::reset(); fake::interfaceReadyAt = 6000; fake::statusError = CR_ACCESS_DENIED;
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf", &diagnostics) && GetLastError() == ERROR_ACCESS_DENIED &&
+        diagnostics.diagnosticError == ERROR_ACCESS_DENIED,
+        "device status query failure is not hidden behind timeout");
+    fake::reset(); fake::startProblem = CM_PROB_FAILED_START; fake::propertyError = CR_ACCESS_DENIED;
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == ERROR_ACCESS_DENIED,
+        "problem status query failure is explicit");
+    fake::reset(); fake::startProblem = CM_PROB_FAILED_START; fake::propertyError = CR_NO_SUCH_VALUE;
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf", &diagnostics) && GetLastError() == ERROR_GEN_FAILURE &&
+        fake::ticks == 0 && diagnostics.problemCode == CM_PROB_FAILED_START && diagnostics.diagnosticError != 0,
+        "a device problem without optional NTSTATUS is still a failure, not a timeout");
+    fake::reset(); fake::startProblem = CM_PROB_DRIVER_FAILED_LOAD; fake::problemType = DEVPROP_TYPE_UINT32;
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == ERROR_INVALID_DATA,
+        "problem status property type must be NTSTATUS");
+    fake::reset(); fake::startProblem = CM_PROB_DRIVER_FAILED_LOAD; fake::problemSize = sizeof(USHORT);
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == ERROR_INVALID_DATA,
+        "problem status property size must match NTSTATUS");
+    fake::reset(); fake::startProblem = CM_PROB_NEED_RESTART;
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == ERROR_SUCCESS_REBOOT_REQUIRED,
+        "PnP restart problem preserves the manual restart contract");
+    fake::reset(); fake::startProblem = CM_PROB_FAILED_START; fake::problemStatus = static_cast<LONG>(0xC0000022);
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf", &diagnostics) && GetLastError() == ERROR_ACCESS_DENIED &&
+        diagnostics.problemStatus == fake::problemStatus,
+        "NTSTATUS mapping handles failures other than revoked certificates");
+    fake::reset(); fake::startProblem = CM_PROB_UNSIGNED_DRIVER; fake::propertyError = CR_NO_SUCH_VALUE;
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == ERROR_INVALID_IMAGE_HASH,
+        "unsigned-driver problem remains actionable without optional NTSTATUS");
+    fake::reset(); fake::startProblem = CM_PROB_FAILED_START; fake::problemStatus = static_cast<LONG>(0xC0FF1234);
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf", &diagnostics) && GetLastError() == ERROR_MR_MID_NOT_FOUND &&
+        diagnostics.problemStatus == fake::problemStatus,
+        "unmapped NTSTATUS is retained rather than replaced with a fabricated cause");
+    fake::reset(); fake::startProblem = CM_PROB_FAILED_START; fake::problemStatus = static_cast<LONG>(0xE1234567);
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf", &diagnostics) && GetLastError() == 0xE1234567 &&
+        diagnostics.problemStatus == fake::problemStatus,
+        "customer-defined status follows the system's pass-through mapping");
+    fake::reset(); fake::openError = ERROR_ACCESS_DENIED;
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == ERROR_ACCESS_DENIED && fake::statusQueries == 0,
+        "non-retryable interface errors are not overwritten by PnP diagnostics");
 
     fake::reset(); fake::leaseExists = true;
     check(!CqAcquireSession() && GetLastError() == ERROR_BUSY, "cross-process lease rejects existing event");

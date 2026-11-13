@@ -15,6 +15,8 @@
 namespace fake {
     HANDLE device = reinterpret_cast<HANDLE>(3);
     DWORD installError = 0, changeError = 0, openError = 0, stopError = 0;
+    uint32_t startProblemCode = 0, startDiagnosticError = 0;
+    int32_t startProblemStatus = 0;
     uint16_t infoMajor = CQKEYS_PROTOCOL_MAJOR;
     DWORD infoBytes = sizeof(CqDeviceInfo);
     uint32_t infoMaxReportLength = CQKEYS_MAX_REPORT_LENGTH;
@@ -66,6 +68,7 @@ namespace fake {
     BOOL error(DWORD code) { SetLastError(code); return FALSE; }
     void reset() {
         installError = changeError = openError = stopError = 0;
+        startProblemCode = startDiagnosticError = 0; startProblemStatus = 0;
         infoMajor = CQKEYS_PROTOCOL_MAJOR;
         infoBytes = sizeof(CqDeviceInfo);
         infoMaxReportLength = CQKEYS_MAX_REPORT_LENGTH;
@@ -280,8 +283,13 @@ HANDLE CqOpenInterface() {
     fake::openedEpoch = fake::epoch;
     return fake::device;
 }
-BOOL CqInstallDevice(const char*) {
+BOOL CqInstallDevice(const char*, CqDriverStartResult* diagnostics) {
     ++fake::installs;
+    if (diagnostics) {
+        diagnostics->problemCode = fake::startProblemCode;
+        diagnostics->problemStatus = fake::startProblemStatus;
+        diagnostics->diagnosticError = fake::startDiagnosticError;
+    }
     return fake::installError ? fake::error(fake::installError) : TRUE;
 }
 BOOL CqChangeDevice(bool remove) {
@@ -427,6 +435,46 @@ void testDescriptor() {
     check(reportBits[4] == (sizeof(CqConsumerReport) - 1) * 8, "consumer descriptor matches wire layout");
 }
 
+void testDriverStartDiagnostics() {
+    fake::reset();
+    fake::installError = static_cast<DWORD>(CERT_E_REVOKED);
+    fake::startProblemCode = 39;
+    fake::startProblemStatus = static_cast<int32_t>(0xC0000603);
+    check(!LoadNTDriver("cqkeys", "C:\\test\\cqkeys.inf"), "simulated revoked driver fails to load");
+    CqDriverStartResult result{sizeof(CqDriverStartResult), CQ_DRIVER_START_RESULT_ABI};
+    check(GetLastDriverStartResult(&result) && result.error == fake::installError && result.problemCode == 39 &&
+        result.problemStatus == fake::startProblemStatus && !result.diagnosticError,
+        "startup snapshot retains original system error and PnP details");
+    check(GetLastError() == fake::installError && static_cast<DWORD>(GetDetailedErrorCode()) == fake::installError,
+        "reading startup diagnostics does not clear the original error");
+    std::thread other([] {
+        check(!LoadNTDriver("other", nullptr), "other thread records an independent startup failure");
+        CqDriverStartResult snapshot{sizeof(CqDriverStartResult), CQ_DRIVER_START_RESULT_ABI};
+        check(GetLastDriverStartResult(&snapshot) && snapshot.error == ERROR_INVALID_NAME && !snapshot.problemCode,
+            "other thread does not inherit startup diagnostics");
+    });
+    other.join();
+    check(GetLastDriverStartResult(&result) && result.problemCode == 39 && result.error == fake::installError,
+        "other thread cannot overwrite startup diagnostics");
+    check(!GetLastDriverStartResult(nullptr) && GetLastError() == ERROR_INVALID_PARAMETER, "null startup result rejected");
+    result.size = 0;
+    check(!GetLastDriverStartResult(&result) && GetLastError() == ERROR_INVALID_PARAMETER, "startup result size checked");
+    result.size = sizeof(result); result.version = 2;
+    check(!GetLastDriverStartResult(&result) && GetLastError() == ERROR_INVALID_PARAMETER, "startup result version checked");
+    result.version = CQ_DRIVER_START_RESULT_ABI;
+    check(UnloadNTDriver("cqkeys"), "failed startup retains a cleanup path");
+    check(GetLastDriverStartResult(&result) && result.error == fake::installError,
+        "cleanup does not erase the last startup result");
+    check(!LoadNTDriver("other", nullptr) && GetLastDriverStartResult(&result) &&
+        result.error == ERROR_INVALID_NAME && !result.problemCode && !result.problemStatus && !result.diagnosticError,
+        "early validation failure resets stale startup details");
+    fake::reset();
+    check(LoadNTDriver("cqkeys", "C:\\test\\cqkeys.inf") && GetLastDriverStartResult(&result) &&
+        !result.error && !result.problemCode && !result.problemStatus && !result.diagnosticError,
+        "successful load resets the last startup failure");
+    check(UnloadNTDriver("cqkeys"), "successful simulated startup cleanup");
+}
+
 #ifndef CQ_INPUT_TASK_TEST
 int main() {
     const char* name = "cqkeys";
@@ -441,6 +489,7 @@ int main() {
     testLeaseReleaseFailure([] { return CleanupInputRuntime(); });
     testLeaseReleaseFailure([] { return StopNTDriver("cqkeys"); });
     testLeaseReleaseFailure([] { return UnloadNTDriver("cqkeys"); });
+    testDriverStartDiagnostics();
     fake::reset();
     check(GetLifecycleVersion() == 2, "lifecycle ABI is independent of wire 3.0");
     check(sizeof(CqDeviceInfo) == 56 && sizeof(CqDeviceState) == 88 && sizeof(CqSubmitResult) == 32, "wire sizes");

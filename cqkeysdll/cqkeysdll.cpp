@@ -44,6 +44,7 @@ namespace {
     thread_local CqInputResult g_lastInput{sizeof(CqInputResult), CQ_INPUT_RESULT_ABI};
     std::atomic<DEVICE_STATUS> g_status{DEVICE_STATUS_UNKNOWN};
     std::atomic<DWORD> g_error{ERROR_SUCCESS};
+    thread_local CqDriverStartResult g_lastDriverStart{sizeof(CqDriverStartResult), CQ_DRIVER_START_RESULT_ABI};
     std::atomic<ULONGLONG> g_lastCheck{0};
 
     struct StopRequest {
@@ -677,12 +678,23 @@ BOOL __cdecl GetLastInputResult(CqInputResult* result) {
 
 BOOL __cdecl LoadNTDriver(const char* name, const char* path) {
     std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
-    if (!ValidateName(name)) return FALSE;
-    if (g_device != INVALID_HANDLE_VALUE || g_cleanupRequired) return Fail(ERROR_BUSY);
-    if (!CqAcquireSession()) return Fail(GetLastError());
+    g_lastDriverStart = {sizeof(CqDriverStartResult), CQ_DRIVER_START_RESULT_ABI};
+    auto fail = [](DWORD error) {
+        g_lastDriverStart.error = error;
+        return Fail(error);
+    };
+    if (!ValidateName(name)) return fail(GetLastError());
+    if (g_device != INVALID_HANDLE_VALUE || g_cleanupRequired) return fail(ERROR_BUSY);
+    if (!CqAcquireSession()) return fail(GetLastError());
     g_ownsSession = true;
-    if (!CqInstallDevice(path)) return Fail(GetLastError());
+    if (!CqInstallDevice(path, &g_lastDriverStart)) return fail(GetLastError());
     return Success();
+}
+BOOL __cdecl GetLastDriverStartResult(CqDriverStartResult* result) {
+    if (!result || result->size != sizeof(*result) || result->version != CQ_DRIVER_START_RESULT_ABI)
+        return Fail(ERROR_INVALID_PARAMETER);
+    *result = g_lastDriverStart;
+    return TRUE;
 }
 BOOL __cdecl StopNTDriver(const char* name) { return StopDriver(name, false); }
 BOOL __cdecl UnloadNTDriver(const char* name) { return StopDriver(name, true); }

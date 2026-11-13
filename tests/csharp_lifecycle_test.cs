@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -34,6 +35,8 @@ internal static class CSharpLifecycleTest
         Run("service dispose is idempotent and retryable", DisposeCanRetry);
         Run("Win32 errors retain operation, code and system description", ErrorMessagesPreserveDetails);
         Run("3010 explains restart without restarting", RebootErrorIsExplicit);
+        Run("revoked startup displays original PnP problem and NTSTATUS", RevokedStartupIsExplicit);
+        Run("missing startup diagnostics are not reported as revocation", StartupDiagnosticsPreserveUncertainty);
         Console.WriteLine($"{executed - failures}/{executed} passed; simulated boundaries are not WPF or device acceptance tests.");
         return failures == 0 ? 0 : 1;
     }
@@ -313,5 +316,51 @@ internal static class CSharpLifecycleTest
         Check(error.NativeErrorCode == 3010 && error.Message.Contains("3010"), "3010 was changed or hidden");
         Check(error.Message.Contains(new Win32Exception(3010).Message), "Reboot system description missing");
         Check(error.Message.Contains("重启") && error.Message.Contains("不会自动重启"), "Missing manual restart guidance");
+    }
+
+    private static Win32Exception CreateProductionStartError(int code, uint problemCode, int problemStatus, uint diagnosticError)
+    {
+        Type manager = typeof(ProductionApp::CqKeys.DriverManager);
+        Type resultType = manager.GetNestedType("DriverStartResult", BindingFlags.NonPublic);
+        Check(resultType != null, "Missing production startup diagnostic structure");
+        Check(Marshal.SizeOf(resultType) == 24 && Marshal.OffsetOf(resultType, "ProblemStatus").ToInt32() == 16,
+            "Startup result layout does not match the native ABI");
+        object result = Activator.CreateInstance(resultType);
+        resultType.GetField("Size").SetValue(result, (uint)24);
+        resultType.GetField("Version").SetValue(result, (uint)1);
+        resultType.GetField("Error").SetValue(result, unchecked((uint)code));
+        resultType.GetField("ProblemCode").SetValue(result, problemCode);
+        resultType.GetField("ProblemStatus").SetValue(result, problemStatus);
+        resultType.GetField("DiagnosticError").SetValue(result, diagnosticError);
+        MethodInfo formatter = manager.GetMethod("CreateDriverStartException", BindingFlags.NonPublic | BindingFlags.Static);
+        Check(formatter != null, "Missing production startup error formatter");
+        return (Win32Exception)formatter.Invoke(null, new object[] { code, result });
+    }
+
+    private static void RevokedStartupIsExplicit()
+    {
+        int revoked = unchecked((int)0x800B010C);
+        Win32Exception error = CreateProductionStartError(revoked, 39, unchecked((int)0xC0000603), 0);
+        Check(error.NativeErrorCode == revoked && error.Message.Contains("0x800B010C"), "Original error was changed");
+        Check(error.Message.Contains("LoadNTDriver") && error.Message.Contains(new Win32Exception(revoked).Message),
+            "Original operation or system description is missing");
+        Check(error.Message.Contains("PnP Problem Code 39") && error.Message.Contains("0x00000027"), "PnP code is missing");
+        Check(error.Message.Contains("0xC0000603") && error.Message.Contains("STATUS_IMAGE_CERT_REVOKED"), "NTSTATUS is missing");
+        Check(error.Message.Contains("吊销") && error.Message.Contains("驱动包"), "Missing actionable revocation guidance");
+    }
+
+    private static void StartupDiagnosticsPreserveUncertainty()
+    {
+        Win32Exception error = CreateProductionStartError(31, 10, 0, 1168);
+        Check(error.NativeErrorCode == 31 && error.Message.Contains("PnP Problem Code 10"), "Known failure was lost");
+        Check(error.Message.Contains("1168") && error.Message.Contains("诊断查询失败"), "Missing diagnostic status was hidden");
+        Check(!error.Message.Contains("Problem Status") && !error.Message.Contains("吊销"), "Missing status was fabricated");
+        error = CreateProductionStartError(1460, 0, 0, 0);
+        Check(error.NativeErrorCode == 1460 && !error.Message.Contains("PnP Problem") && !error.Message.Contains("吊销"),
+            "Ordinary timeout must not be relabelled as a known device failure");
+        error = CreateProductionStartError(5, 0, 0, 5);
+        Check(error.Message.Contains("诊断查询失败") && error.Message.Contains("0x00000005"), "Status query failure was hidden");
+        error = CreateProductionStartError(3010, 14, 0, 0);
+        Check(error.Message.Contains("重启") && error.Message.Contains("不会自动重启"), "Restart guidance was lost");
     }
 }
