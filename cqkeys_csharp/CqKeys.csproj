@@ -98,6 +98,7 @@
   <ItemGroup>
     <Compile Include="DriverManager.cs" />
     <Compile Include="DriverService.cs" />
+    <Compile Include="DriverInputTester.cs" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="dll\**\*.*" Exclude="dll\cqkeysdll.dll">

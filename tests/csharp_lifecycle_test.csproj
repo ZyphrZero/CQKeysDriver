@@ -20,10 +20,12 @@
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Compile Include="csharp_lifecycle_test.cs" />
+    <Compile Include="csharp_input_test.cs" />
     <Compile Include="csharp_ui_stubs.cs" />
     <Compile Include="..\cqkeys_csharp\App.xaml.cs"><Link>App.xaml.cs</Link></Compile>
     <Compile Include="..\cqkeys_csharp\MainWindow.xaml.cs"><Link>MainWindow.xaml.cs</Link></Compile>
     <Compile Include="..\cqkeys_csharp\DriverService.cs"><Link>DriverService.cs</Link></Compile>
+    <Compile Include="..\cqkeys_csharp\DriverInputTester.cs"><Link>DriverInputTester.cs</Link></Compile>
     <ProjectReference Include="..\cqkeys_csharp\CqKeys.csproj">
       <Project>{91376624-55E8-4209-BFBB-42574A6E6935}</Project>
       <Name>CqKeys</Name>

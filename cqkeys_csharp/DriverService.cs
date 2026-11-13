@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace CqKeys
@@ -38,6 +39,7 @@ namespace CqKeys
 
         public bool IsDriverInstalled => _isDriverInstalled;
         public bool NeedsCleanup => _driverManager.NeedsCleanup;
+        public bool CanTestInput => _isDriverInstalled && _driverManager.IsInputReady;
         
         public string DriverPath => _driverPath;
 
@@ -79,7 +81,7 @@ namespace CqKeys
                 
                 if (_isDriverInstalled)
                 {
-                    OnStatusChanged("驱动安装成功！");
+                    OnStatusChanged("驱动安装并连接成功，可测试键盘/鼠标输入；连接成功不代表应用已收到输入。");
                 }
             }
             catch (Exception ex)
@@ -111,6 +113,21 @@ namespace CqKeys
             catch (Exception ex)
             {
                 OnStatusChanged($"驱动卸载失败: {ex.Message}");
+                throw;
+            }
+        }
+
+        public async Task TestInputAsync(InputTestKind kind, CancellationToken cancellation)
+        {
+            if (!CanTestInput) throw new InvalidOperationException("驱动尚未成功连接，不能测试输入。");
+            try
+            {
+                OnStatusChanged(kind == InputTestKind.Keyboard ? "正在发送 F8 按下/释放测试..." : "正在发送鼠标右移/左移各 24 HID 计数测试...");
+                OnStatusChanged(await _driverManager.TestInputAsync(kind, cancellation));
+            }
+            catch (Exception error)
+            {
+                OnStatusChanged($"输入测试未成功完成：{error.Message} 请先卸载清理后重试。");
                 throw;
             }
         }

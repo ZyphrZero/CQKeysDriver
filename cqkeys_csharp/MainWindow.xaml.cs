@@ -1,6 +1,9 @@
 ﻿using System;
 using System.Windows;
 using System.ComponentModel;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Input;
 
 namespace CqKeys
 {
@@ -9,6 +12,9 @@ namespace CqKeys
         private readonly DriverService _driverService;
         private bool operationPending;
         private bool closeAllowed;
+        private CancellationTokenSource testCancellation;
+        private bool observingInput;
+        private int observedKeyDown, observedKeyUp, observedMouseMoves;
 
         public MainWindow(DriverService driverService)
         {
@@ -38,6 +44,101 @@ namespace CqKeys
         {
             InstallButton.IsEnabled = !operationPending && !_driverService.NeedsCleanup;
             UninstallButton.IsEnabled = !operationPending && _driverService.NeedsCleanup;
+            KeyboardTestButton.IsEnabled = MouseTestButton.IsEnabled = !operationPending && _driverService.CanTestInput;
+            CancelTestButton.IsEnabled = testCancellation != null && !testCancellation.IsCancellationRequested;
+        }
+
+        private async void KeyboardTestButton_Click(object sender, RoutedEventArgs e)
+        {
+            await RunInputTestAsync(InputTestKind.Keyboard);
+        }
+
+        private async void MouseTestButton_Click(object sender, RoutedEventArgs e)
+        {
+            await RunInputTestAsync(InputTestKind.Mouse);
+        }
+
+        private async Task RunInputTestAsync(InputTestKind kind)
+        {
+            if (operationPending || !_driverService.CanTestInput) return;
+            operationPending = true;
+            testCancellation = new CancellationTokenSource();
+            testCancellation.CancelAfter(5000);
+            UpdateButtonStates();
+            try
+            {
+                if (!IsActive || Keyboard.Modifiers != ModifierKeys.None || !InputTestSurface.Focus())
+                    throw new InvalidOperationException("请将本窗口置于前台并松开 Ctrl/Alt/Shift/Win 后重试。");
+                observedKeyDown = observedKeyUp = observedMouseMoves = 0;
+                InputObservationText.Text = "准备测试，请勿操作实体键鼠...";
+                await Task.Delay(200, testCancellation.Token);
+                if (!IsActive) throw new OperationCanceledException("窗口已失去焦点。");
+                observingInput = true;
+                await _driverService.TestInputAsync(kind, testCancellation.Token);
+                await Task.Delay(200);
+                bool observed = kind == InputTestKind.Keyboard ? observedKeyDown > 0 && observedKeyUp > 0 : observedMouseMoves > 0;
+                InputObservationText.Text = (observed ? "本窗口观察到相应事件（来源未经鉴定）。" : "未观察到完整的预期事件，不能确认端到端输入生效。") + ObservationCounts();
+            }
+            catch (OperationCanceledException error)
+            {
+                InputObservationText.Text = "测试已取消；已提交输入不能撤回。" + ObservationCounts();
+                DriverService_StatusChanged(this, error.Message);
+            }
+            catch (Exception error)
+            {
+                InputObservationText.Text = "测试失败，未判定输入有效。" + ObservationCounts();
+                DriverService_StatusChanged(this, "输入测试失败：" + error.Message);
+                MessageBox.Show(error.Message, "输入测试失败");
+            }
+            finally
+            {
+                observingInput = false;
+                testCancellation.Dispose();
+                testCancellation = null;
+                operationPending = false;
+                UpdateButtonStates();
+            }
+        }
+
+        private string ObservationCounts()
+        {
+            return $" F8 按下 {observedKeyDown} 次、释放 {observedKeyUp} 次；鼠标移动事件 {observedMouseMoves} 次。";
+        }
+
+        private void InputPreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (!observingInput || e.Key != Key.F8 || e.IsRepeat) return;
+            observedKeyDown++;
+            InputObservationText.Text = "正在接收：" + ObservationCounts();
+            e.Handled = true;
+        }
+
+        private void InputPreviewKeyUp(object sender, KeyEventArgs e)
+        {
+            if (!observingInput || e.Key != Key.F8) return;
+            observedKeyUp++;
+            InputObservationText.Text = "正在接收：" + ObservationCounts();
+            e.Handled = true;
+        }
+
+        private void InputPreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (!observingInput) return;
+            observedMouseMoves++;
+            InputObservationText.Text = "正在接收：" + ObservationCounts();
+        }
+
+        private void CancelTestButton_Click(object sender, RoutedEventArgs e)
+        {
+            testCancellation?.Cancel();
+            InputObservationText.Text = "已请求取消，等待实际任务结束和释放；请勿强制关闭。";
+            UpdateButtonStates();
+        }
+
+        protected override void OnDeactivated(EventArgs e)
+        {
+            testCancellation?.Cancel();
+            base.OnDeactivated(e);
         }
 
         private async void InstallButton_Click(object sender, RoutedEventArgs e)
@@ -90,7 +191,11 @@ namespace CqKeys
             if (closeAllowed) { base.OnClosing(e); return; }
             e.Cancel = true;
             base.OnClosing(e);
-            if (operationPending) return;
+            if (operationPending)
+            {
+                testCancellation?.Cancel();
+                return;
+            }
             operationPending = true;
             UpdateButtonStates();
             try

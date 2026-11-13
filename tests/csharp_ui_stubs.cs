@@ -67,10 +67,12 @@ namespace System.Windows
         public TestDispatcher Dispatcher { get; } = new TestDispatcher();
         public bool IsClosed { get; private set; }
         public bool IsShown { get; private set; }
+        public bool IsActive { get; private set; } = true;
         public bool CancelNextClose { get; set; }
         public Exception CloseFailure { get; set; }
         public int ReentrantCloseCount { get; private set; }
         public void Show() { IsShown = true; }
+        public void Deactivate() { IsActive = false; OnDeactivated(EventArgs.Empty); }
         public void Close()
         {
             if (closing)
@@ -102,6 +104,7 @@ namespace System.Windows
             }
         }
         protected virtual void OnClosed(EventArgs args) { }
+        protected virtual void OnDeactivated(EventArgs args) { }
     }
 
     public sealed class TestControl
@@ -110,7 +113,22 @@ namespace System.Windows
         public string Text { get; set; } = "";
         public void AppendText(string text) { Text += text; }
         public void ScrollToEnd() { }
+        public bool Focus() { return true; }
     }
+}
+
+namespace System.Windows.Input
+{
+    public enum ModifierKeys { None, Control }
+    public enum Key { F8, A }
+    public static class Keyboard { public static ModifierKeys Modifiers { get; set; } }
+    public class KeyEventArgs : EventArgs
+    {
+        public Key Key { get; set; }
+        public bool IsRepeat { get; set; }
+        public bool Handled { get; set; }
+    }
+    public class MouseEventArgs : EventArgs { }
 }
 
 namespace CqKeys
@@ -120,6 +138,9 @@ namespace CqKeys
         public static bool DenyConstruction;
         public static DriverManager LastCreated;
         public bool NeedsCleanup { get; set; }
+        public bool IsInputReady { get; set; }
+        public int TestCalls { get; private set; }
+        public Func<InputTestKind, CancellationToken, Task<string>> InputTestOperation { get; set; }
         public int InstallCalls { get; private set; }
         public int UninstallCalls { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -142,7 +163,15 @@ namespace CqKeys
             if (UninstallFailure != null) throw UninstallFailure;
             if (UninstallCompletion != null) await UninstallCompletion.Task;
             NeedsCleanup = false;
+            IsInputReady = false;
             return true;
+        }
+        public async Task<string> TestInputAsync(InputTestKind kind, CancellationToken cancellation)
+        {
+            TestCalls++;
+            if (InputTestOperation == null) throw new InvalidOperationException("No input boundary configured; real input is forbidden in this harness");
+            try { return await InputTestOperation(kind, cancellation); }
+            catch { IsInputReady = false; throw; }
         }
         public void Dispose()
         {
@@ -158,6 +187,11 @@ namespace CqKeys
         public System.Windows.TestControl LogTextBox = new System.Windows.TestControl();
         public System.Windows.TestControl InstallButton = new System.Windows.TestControl();
         public System.Windows.TestControl UninstallButton = new System.Windows.TestControl();
+        public System.Windows.TestControl KeyboardTestButton = new System.Windows.TestControl();
+        public System.Windows.TestControl MouseTestButton = new System.Windows.TestControl();
+        public System.Windows.TestControl CancelTestButton = new System.Windows.TestControl();
+        public System.Windows.TestControl InputTestSurface = new System.Windows.TestControl();
+        public System.Windows.TestControl InputObservationText = new System.Windows.TestControl();
         private void InitializeComponent() { }
     }
 }

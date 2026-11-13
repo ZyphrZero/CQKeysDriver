@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using CqKeys;
 
-internal static class CSharpLifecycleTest
+internal static partial class CSharpLifecycleTest
 {
     private static int failures;
     private static int executed;
@@ -37,6 +37,7 @@ internal static class CSharpLifecycleTest
         Run("3010 explains restart without restarting", RebootErrorIsExplicit);
         Run("revoked startup displays original PnP problem and NTSTATUS", RevokedStartupIsExplicit);
         Run("missing startup diagnostics are not reported as revocation", StartupDiagnosticsPreserveUncertainty);
+        RunInputTests();
         Console.WriteLine($"{executed - failures}/{executed} passed; simulated boundaries are not WPF or device acceptance tests.");
         return failures == 0 ? 0 : 1;
     }

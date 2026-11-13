@@ -15,6 +15,7 @@ namespace CqKeys
         private readonly SemaphoreSlim operations = new SemaphoreSlim(1, 1);
         private bool needsCleanup;
         private bool disposed;
+        public bool IsInputReady { get; private set; }
         public bool NeedsCleanup => needsCleanup;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -90,6 +91,7 @@ namespace CqKeys
                     }
                     if (!Native.SetHandle())
                         throw CreateDriverException(Marshal.GetLastWin32Error(), "SetHandle 连接驱动设备失败");
+                    IsInputReady = true;
                     return true;
                 });
             }
@@ -103,6 +105,7 @@ namespace CqKeys
             try
             {
                 if (disposed) throw new ObjectDisposedException(nameof(DriverManager));
+                IsInputReady = false;
                 await Task.Run(() =>
                 {
                     if (!Native.UnloadNTDriver(driverName))
@@ -125,8 +128,22 @@ namespace CqKeys
                 if (needsCleanup && !Native.StopNTDriver("cqkeys"))
                     throw CreateDriverException(Marshal.GetLastWin32Error(), "StopNTDriver 驱动停止失败");
                 needsCleanup = false;
+                IsInputReady = false;
                 disposed = true;
             }
+            finally { operations.Release(); }
+        }
+
+        public async Task<string> TestInputAsync(InputTestKind kind, CancellationToken cancellation)
+        {
+            await operations.WaitAsync(cancellation);
+            try
+            {
+                if (disposed) throw new ObjectDisposedException(nameof(DriverManager));
+                if (!IsInputReady) throw new InvalidOperationException("请先成功安装并连接驱动；失败后须先卸载清理。");
+                return await Task.Run(() => DriverInputTester.Run(new NativeInputTaskApi(), kind, cancellation));
+            }
+            catch { IsInputReady = false; throw; }
             finally { operations.Release(); }
         }
 

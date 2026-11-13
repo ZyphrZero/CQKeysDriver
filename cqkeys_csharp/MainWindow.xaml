@@ -5,17 +5,20 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:CqKeys"
         mc:Ignorable="d"
-        Title="CqKeys 驱动管理器" Height="450" Width="800"
+        Title="CqKeys 驱动与输入测试" Height="660" Width="880" MinHeight="600" MinWidth="800"
+        PreviewKeyDown="InputPreviewKeyDown" PreviewKeyUp="InputPreviewKeyUp"
+        PreviewMouseMove="InputPreviewMouseMove"
         WindowStartupLocation="CenterScreen">
     <Grid Margin="20">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Text="CqKeys 驱动管理器"
+        <TextBlock Text="CqKeys 驱动与输入测试"
                    FontSize="24" 
                    FontWeight="Bold" 
                    Margin="0,0,0,10"/>
@@ -26,7 +29,25 @@
                    Margin="0,0,0,10"
                    TextWrapping="Wrap"/>
 
-        <ScrollViewer Grid.Row="2" 
+        <Border Grid.Row="2" x:Name="InputTestSurface" Focusable="True"
+                BorderBrush="#8093A8" BorderThickness="1" CornerRadius="4" Padding="14" Margin="0,0,0,14"
+                Background="#F4F7FA">
+            <StackPanel>
+                <TextBlock Text="虚拟 HID 输入测试" FontSize="16" FontWeight="SemiBold"/>
+                <TextBlock Margin="0,8,0,10" TextWrapping="Wrap"
+                           Text="成功安装并连接驱动后才能测试。保持窗口在前台，不要操作实体键鼠或按住修饰键。测试会发送真实系统输入；失焦、取消或超过 5 秒会请求停止，仍需等待驱动实际清理完成。"/>
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="KeyboardTestButton" Content="键盘测试（F8）" Padding="12,6" Margin="0,0,10,0" Click="KeyboardTestButton_Click"/>
+                    <Button x:Name="MouseTestButton" Content="鼠标测试（右移/返回）" Padding="12,6" Margin="0,0,10,0" Click="MouseTestButton_Click"/>
+                    <Button x:Name="CancelTestButton" Content="取消测试" Padding="12,6" Click="CancelTestButton_Click"/>
+                </StackPanel>
+                <TextBlock x:Name="InputObservationText" Text="接收区：尚未开始测试。" Margin="0,12,0,6" TextWrapping="Wrap"/>
+                <TextBlock Text="DLL 完成只证明报告提交；接收区只记录本窗口的 WPF 事件，不鉴定输入设备来源，也不证明其他应用已接收。鼠标位移受 Windows 加速影响，不保证精确回到原点。"
+                           Foreground="#4B5563" TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+
+        <ScrollViewer Grid.Row="3"
                       Margin="0,0,0,20">
             <TextBox x:Name="LogTextBox" 
                      IsReadOnly="True"
@@ -34,7 +55,7 @@
                      VerticalScrollBarVisibility="Auto"/>
         </ScrollViewer>
 
-        <StackPanel Grid.Row="3" 
+        <StackPanel Grid.Row="4"
                     Orientation="Horizontal" 
                     HorizontalAlignment="Right">
             <Button x:Name="InstallButton"
