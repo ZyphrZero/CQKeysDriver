@@ -1,10 +1,21 @@
 # -*- coding: utf-8 -*-
 
 import os
-import time
 from ctypes import CDLL
 import sys
 import ctypes
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cqkeyspy_test"))
+from input_tester import InputTester
+from input_tasks import InputTasks, InputTaskCancelled
+from virtuakeys_mapping import VirtualKeys
+
+
+class InputInitializationError(RuntimeError):
+    def __init__(self, error, tester):
+        self.tester = tester
+        super().__init__(f"初始化失败: {error}；可通过异常的 tester.cleanup() 重试清理")
 
 class SimpleInputTester:
     def __init__(self, dll_path=None, sys_path=None):
@@ -20,6 +31,8 @@ class SimpleInputTester:
 
         # 加载驱动
         self.driver = CDLL(self.dll_path, use_last_error=True)
+        self.needs_cleanup = False
+        self.ready = False
         self.driver.GetLifecycleVersion.argtypes = []
         self.driver.GetLifecycleVersion.restype = ctypes.c_uint32
         if self.driver.GetLifecycleVersion() != 2:
@@ -36,13 +49,17 @@ class SimpleInputTester:
             function.restype = None
             function.errcheck = self._check_input_error
         
-        # 加载驱动
-        if not self.driver.LoadNTDriver(b'cqkeys', self.sys_path.encode('mbcs')):
-            raise ctypes.WinError(ctypes.get_last_error())
-        
-        # 设置句柄
-        if not self.driver.SetHandle():
-            raise ctypes.WinError(ctypes.get_last_error())
+        self.tasks = InputTasks(self.driver)
+        self.input_tester = InputTester(self.driver, tasks=self.tasks)
+        self.needs_cleanup = True
+        try:
+            if not self.driver.LoadNTDriver(b'cqkeys', self.sys_path.encode('mbcs')):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not self.driver.SetHandle():
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.ready = True
+        except (Exception, KeyboardInterrupt) as error:
+            raise InputInitializationError(error, self) from error
 
     @staticmethod
     def _check_input_error(result, function, arguments):
@@ -53,110 +70,70 @@ class SimpleInputTester:
 
     def cleanup(self):
         """清理驱动"""
-        if self.driver:
+        if self.driver and self.needs_cleanup:
+            self.ready = False
+            self.input_tester.stop()
+            self.tasks.collect()
             if not self.driver.UnloadNTDriver(b'cqkeys'):
                 raise ctypes.WinError(ctypes.get_last_error())
+            self.tasks.cleanup()
             self.driver = None
+            self.needs_cleanup = False
 
     def press_key(self, key):
         """按下并释放按键"""
-        vk_code = self._get_virtual_key_code(key)
-        if vk_code is None:
-            print(f"无效的按键: {key}")
-            return False
+        if not self.ready:
+            raise RuntimeError("输入会话未就绪")
+        return self.input_tester.press_key(key, duration=0.05)
 
-        try:
-            if self._needs_shift(key):
-                # 按下Shift
-                self.driver.KeyDown(0x10)  # VK_SHIFT
-                time.sleep(0.01)
-                
-                # 按下释放目标键
-                self.driver.KeyDown(vk_code)
-                time.sleep(0.05)
-                self.driver.KeyUp(vk_code)
-                
-                # 释放Shift
-                time.sleep(0.01)
-                self.driver.KeyUp(0x10)
-            else:
-                # 直接按下释放目标键
-                self.driver.KeyDown(vk_code)
-                time.sleep(0.05)
-                self.driver.KeyUp(vk_code)
-            return True
-        except Exception as e:
-            print(f"按键操作失败: {str(e)}")
-            return False
-
-    def type_string(self, text, interval=0.05):
+    def type_string(self, text, interval=0.05, initial_delay=0):
         """输入字符串"""
-        for char in text:
-            self.press_key(char)
-            time.sleep(interval)
+        if not self.ready:
+            raise RuntimeError("输入会话未就绪")
+        return self.input_tester.type_text(text, interval=interval, duration=0.05,
+                                           initial_delay=initial_delay)
 
     def _get_virtual_key_code(self, key):
         """获取虚拟键码"""
-        # 空格特殊处理
-        if key == ' ':
-            return 0x20  # VK_SPACE
-            
-        # 基本按键映射
-        key_map = {
-            # 字母
-            'a': 0x41, 'b': 0x42, 'c': 0x43, 'd': 0x44, 'e': 0x45,
-            'f': 0x46, 'g': 0x47, 'h': 0x48, 'i': 0x49, 'j': 0x4A,
-            'k': 0x4B, 'l': 0x4C, 'm': 0x4D, 'n': 0x4E, 'o': 0x4F,
-            'p': 0x50, 'q': 0x51, 'r': 0x52, 's': 0x53, 't': 0x54,
-            'u': 0x55, 'v': 0x56, 'w': 0x57, 'x': 0x58, 'y': 0x59,
-            'z': 0x5A,
-            
-            # 数字
-            '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34,
-            '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
-            
-            # 特殊字符
-            ',': 0xBC, '.': 0xBE, '/': 0xBF, ';': 0xBA,
-            "'": 0xDE, '[': 0xDB, ']': 0xDD, '\\': 0xDC,
-            '-': 0xBD, '=': 0xBB, '`': 0xC0,
-            
-            # 需要Shift的特殊字符
-            '!': 0x31, '@': 0x32, '#': 0x33, '$': 0x34, '%': 0x35,
-            '^': 0x36, '&': 0x37, '*': 0x38, '(': 0x39, ')': 0x30,
-            '_': 0xBD, '+': 0xBB, '{': 0xDB, '}': 0xDD, '|': 0xDC,
-            ':': 0xBA, '"': 0xDE, '<': 0xBC, '>': 0xBE, '?': 0xBF,
-            '~': 0xC0,
-        }
-        
-        return key_map.get(key.lower())
+        return VirtualKeys.get_vk_code(key)
 
     def _needs_shift(self, char):
         """判断字符是否需要按住Shift"""
-        shift_chars = {
-            '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', 
-            '_', '+', '{', '}', '|', ':', '"', '<', '>', '?'
-        }
-        return char.isupper() or char in shift_chars
+        return (len(char) == 1 and char.isupper()) or VirtualKeys.needs_shift(char)
 
 def main():
-    # 创建测试实例
-    tester = SimpleInputTester()
-    
+    tester = None
+    exit_code = 0
     try:
-        # 等待用户准备
+        tester = SimpleInputTester()
         print("驱动已加载，3秒后开始输入...")
-        time.sleep(3)
         
         # 测试字符串
         test_string = "Hello, World!"
         print(f"测试字符串输入: {test_string}")
-        tester.type_string(test_string)
+        tester.type_string(test_string, initial_delay=3)
         
+    except InputInitializationError as error:
+        tester = error.tester
+        print(str(error))
+        exit_code = 130 if isinstance(error.__cause__, KeyboardInterrupt) else 1
+    except (KeyboardInterrupt, InputTaskCancelled) as error:
+        print("测试已取消。")
+        exit_code = 130
+        if error.__cause__ is not None:
+            print(f"中断后任务清理失败: {error.__cause__}")
+            exit_code = 1
     except Exception as e:
         print(f"测试出错: {str(e)}")
+        exit_code = 1
     finally:
-        # 清理驱动
-        tester.cleanup()
+        if tester is not None:
+            try:
+                tester.cleanup()
+            except Exception as error:
+                print(f"清理失败: {error}；不能视为已完成清理。")
+                exit_code = 1
+    return exit_code
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

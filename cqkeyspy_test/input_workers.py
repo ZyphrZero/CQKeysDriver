@@ -1,4 +1,4 @@
-"""Tracked, cooperatively cancellable input workers; independent of Tk."""
+"""Tracked UI/background workers; native tasks arbitrate and time input."""
 import threading
 
 

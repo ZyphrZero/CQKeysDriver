@@ -1,5 +1,9 @@
 #pragma once
 #include <windows.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <winioctl.h>
+#include "../shared/cqkeys_protocol.h"
 
 #ifdef CQKEYSDLL_EXPORTS
 #define CQKEYSDLL_API __declspec(dllexport)
@@ -13,8 +17,98 @@ enum DEVICE_STATUS {
     DEVICE_STATUS_ERROR = 2
 };
 
+enum CQ_INPUT_ACTION_TYPE : uint32_t {
+    CQ_INPUT_KEY_DOWN = 1,
+    CQ_INPUT_KEY_UP = 2,
+    CQ_INPUT_CONSUMER_DOWN = 3,
+    CQ_INPUT_CONSUMER_UP = 4,
+    CQ_INPUT_MOVE_RELATIVE = 5,
+    CQ_INPUT_MOVE_ABSOLUTE = 6,
+    CQ_INPUT_BUTTONS = 7,
+    CQ_INPUT_WHEEL = 8,
+    CQ_INPUT_WAIT = 9
+};
+
+enum CQ_INPUT_TASK_STATE : uint32_t {
+    CQ_INPUT_TASK_RUNNING = 1,
+    CQ_INPUT_TASK_COMPLETED = 2,
+    CQ_INPUT_TASK_CANCELLED = 3,
+    CQ_INPUT_TASK_FAILED = 4
+};
+
+enum : uint32_t {
+    CQ_INPUT_TASK_ABI = 1,
+    CQ_INPUT_TASK_MAX_ACTIONS = 4096,
+    CQ_INPUT_TASK_MAX_REPEATS = 65535,
+    CQ_INPUT_TASK_MAX_DELAY_MS = 60000
+};
+
+enum : uint32_t {
+    CQ_INPUT_RESULT_ABI = 1,
+    CQ_INPUT_RESULT_PARTIAL = 1,
+    CQ_INPUT_RESULT_UNCERTAIN = 2,
+    CQ_INPUT_RESULT_CANCELLED = 4
+};
+
+#pragma pack(push, 8)
+struct CqInputAction {
+    uint32_t type;
+    int32_t value1;
+    int32_t value2;
+    uint32_t delayMs;
+};
+
+struct CqInputResult {
+    uint32_t size;
+    uint32_t version;
+    uint32_t error;
+    uint32_t flags;
+    uint64_t confirmedReports;
+    int64_t confirmedX;
+    int64_t confirmedY;
+    uint64_t lastSequence;
+};
+
+struct CqInputTaskResult {
+    uint32_t size;
+    uint32_t version;
+    uint32_t state;
+    uint32_t error;
+    uint64_t taskId;
+    uint64_t completedActions;
+    uint32_t completedRepeats;
+    uint32_t cleanupError;
+    uint64_t lastAcceptedSequence;
+    uint64_t lastSubmittedSequence;
+    uint64_t deviceEpoch;
+    uint64_t sessionId;
+    uint32_t sessionPhase;
+    uint32_t pendingCleanup;
+    int32_t inputStatus;
+    int32_t cleanupStatus;
+    uint32_t resultFlags;
+    uint32_t reserved;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(CqInputAction) == 16, "Input action ABI");
+static_assert(sizeof(CqInputResult) == 48, "Input result ABI");
+static_assert(sizeof(CqInputTaskResult) == 96 && offsetof(CqInputTaskResult, taskId) == 16 &&
+    offsetof(CqInputTaskResult, resultFlags) == 88,
+    "Input task result ABI");
+
 extern "C" {
 CQKEYSDLL_API DWORD __cdecl GetLifecycleVersion();
+CQKEYSDLL_API BOOL __cdecl QueryDriverInfo(CqDeviceInfo* info);
+CQKEYSDLL_API BOOL __cdecl QueryInputState(CqDeviceState* state);
+CQKEYSDLL_API BOOL __cdecl GetLastInputResult(CqInputResult* result);
+CQKEYSDLL_API BOOL __cdecl SubmitInputTask(const CqInputAction* actions, uint32_t count,
+    uint32_t repeats, uint32_t repeatDelayMs, uint64_t* outId);
+CQKEYSDLL_API BOOL __cdecl CancelInputTask(uint64_t taskId);
+CQKEYSDLL_API BOOL __cdecl WaitInputTask(uint64_t taskId, uint32_t timeoutMs);
+CQKEYSDLL_API BOOL __cdecl QueryInputTask(uint64_t taskId, CqInputTaskResult* result);
+CQKEYSDLL_API BOOL __cdecl ReleaseInputTask(uint64_t taskId);
+CQKEYSDLL_API BOOL __cdecl CleanupInputRuntime();
 CQKEYSDLL_API BOOL __cdecl LoadNTDriver(const char* name, const char* path);
 CQKEYSDLL_API BOOL __cdecl StopNTDriver(const char* name);
 CQKEYSDLL_API BOOL __cdecl UnloadNTDriver(const char* name);

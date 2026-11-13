@@ -4,10 +4,12 @@ import logging
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, mock_open, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cqkeyspy_test"))
 from driver_manager import DriverManager
+from input_tasks import InputTasks, NativeCallError, action, KEY_DOWN
+from test_input_tasks import native_tasks, fail
 
 
 class DriverManagerTests(unittest.TestCase):
@@ -33,6 +35,16 @@ class DriverManagerTests(unittest.TestCase):
         self.assertTrue(self.manager.initialize())
         self.native.UnloadNTDriver.assert_not_called()
 
+    def test_path_config_uses_the_same_utf8_encoding_as_the_gui(self):
+        config = '{"dll_path": "中文/cqkeysdll.dll", "sys_path": "中文/cqkeys.sys"}'
+        with patch("driver_manager.open", mock_open(read_data=config)) as source, \
+                patch("driver_manager.os.path.exists", return_value=True):
+            self.manager._setup_paths()
+        source.assert_called_once_with("driver_config.json", "r", encoding="utf-8")
+        self.assertEqual(self.manager.dll_path, "中文/cqkeysdll.dll")
+        self.assertEqual(self.manager.sys_path, "中文/cqkeys.sys")
+        self.native.LoadNTDriver.assert_not_called()
+
     def test_failed_device_open_is_not_reported_ready(self):
         self.native.SetHandle.return_value = 0
         ctypes.set_last_error(5)
@@ -56,10 +68,12 @@ class DriverManagerTests(unittest.TestCase):
         self.assertEqual(self.native.UnloadNTDriver.call_count, 1)
 
     def test_incompatible_dll_is_rejected_before_installation(self):
-        self.native.GetLifecycleVersion.return_value = 1
-        self.assertFalse(self.manager.initialize())
-        self.native.LoadNTDriver.assert_not_called()
-        self.assertIsNone(self.manager.driver)
+        for version in (1, 3):
+            with self.subTest(version=version):
+                self.native.GetLifecycleVersion.return_value = version
+                self.assertFalse(self.manager.initialize())
+                self.native.LoadNTDriver.assert_not_called()
+                self.assertIsNone(self.manager.driver)
 
     def test_stop_disables_without_removing_the_device(self):
         self.manager.driver = self.native
@@ -89,6 +103,37 @@ class DriverManagerTests(unittest.TestCase):
         ctypes.set_last_error(5)
         self.assertFalse(self.manager.initialize())
         self.native.UnloadNTDriver.assert_not_called()
+
+    def test_task_results_are_collected_before_pnp_and_cleanup_can_retry(self):
+        native = native_tasks()
+        self.manager.driver = native
+        self.manager.tasks = InputTasks(native)
+        task = self.manager.tasks.submit([action(KEY_DOWN, 65)])
+        native.UnloadNTDriver.return_value = 1
+        native.CleanupInputRuntime.side_effect = fail(5)
+        with self.assertRaises(NativeCallError):
+            self.manager.cleanup()
+        self.assertIs(self.manager.driver, native)
+        self.assertIsNone(self.manager.tasks.active)
+        self.assertIs(self.manager.tasks.last_result, task.result)
+        self.assertTrue(task.released)
+        operations = [entry[0] for entry in native.mock_calls]
+        self.assertLess(operations.index("QueryInputTask"), operations.index("UnloadNTDriver"))
+        native.CleanupInputRuntime.side_effect = None
+        self.manager.cleanup()
+        self.assertIsNone(self.manager.driver)
+        native.ReleaseInputTask.assert_called_once()
+
+    def test_result_collection_failure_prevents_pnp_cleanup(self):
+        native = native_tasks()
+        self.manager.driver = native
+        self.manager.tasks = InputTasks(native)
+        task = self.manager.tasks.submit([action(KEY_DOWN, 65)])
+        native.QueryInputTask.side_effect = fail(5)
+        with self.assertRaises(NativeCallError):
+            self.manager.cleanup()
+        native.UnloadNTDriver.assert_not_called()
+        self.assertIs(self.manager.tasks.active, task)
 
 
 if __name__ == "__main__":

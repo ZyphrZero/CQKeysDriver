@@ -9,6 +9,7 @@ namespace CqKeys
         private readonly DriverManager _driverManager;
         private readonly string _driverName;
         private readonly string _driverPath;
+        private readonly string _dllPath;
         private bool _isDriverInstalled;
         private bool _disposed;
 
@@ -20,29 +21,18 @@ namespace CqKeys
             _driverName = "cqkeys";
             
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string projectDir = baseDir;
             
             _driverPath = Path.Combine(
-                projectDir,
+                baseDir,
                 "dll",
                 "cqkeys.inf"
             );
             
-            string dllPath = Path.Combine(
+            _dllPath = Path.Combine(
                 baseDir,
                 "cqkeysdll.dll"
             );
 
-            if (!File.Exists(_driverPath))
-            {
-                OnStatusChanged($"警告：驱动文件不存在: {_driverPath}");
-            }
-            
-            if (!File.Exists(dllPath))
-            {
-                OnStatusChanged($"警告：DLL文件不存在: {dllPath}");
-            }
-            
             _isDriverInstalled = false;
         }
 
@@ -51,16 +41,37 @@ namespace CqKeys
         
         public string DriverPath => _driverPath;
 
+        public bool CheckDeploymentFiles()
+        {
+            string packageDirectory = Path.GetDirectoryName(_driverPath);
+            string[] requiredFiles =
+            {
+                _driverPath,
+                Path.Combine(packageDirectory, "cqkeys.sys"),
+                Path.Combine(packageDirectory, "cqkeys.cat"),
+                _dllPath
+            };
+            bool complete = true;
+            foreach (string path in requiredFiles)
+            {
+                if (!File.Exists(path))
+                {
+                    complete = false;
+                    OnStatusChanged($"警告：部署文件不存在: {path}");
+                }
+            }
+            return complete;
+        }
+
         public async Task InitializeDriverAsync()
         {
             try
             {
                 OnStatusChanged($"正在查找驱动文件: {_driverPath}");
                 
-                if (!File.Exists(_driverPath))
+                if (!CheckDeploymentFiles())
                 {
-                    OnStatusChanged($"驱动文件不存在！请确保驱动文件位于: {_driverPath}");
-                    throw new FileNotFoundException("找不到驱动文件", _driverPath);
+                    throw new FileNotFoundException("驱动部署文件不完整，请查看日志中的缺失路径。");
                 }
 
                 OnStatusChanged("正在安装驱动...");
@@ -111,25 +122,9 @@ namespace CqKeys
 
         public void Dispose()
         {
-            Dispose(true);
-            GC.SuppressFinalize(this);
-        }
-
-        protected virtual void Dispose(bool disposing)
-        {
-            if (!_disposed)
-            {
-                if (disposing)
-                {
-                    _driverManager?.Dispose();
-                }
-                _disposed = true;
-            }
-        }
-
-        ~DriverService()
-        {
-            Dispose(false);
+            if (_disposed) return;
+            _driverManager.Dispose();
+            _disposed = true;
         }
     }
 }

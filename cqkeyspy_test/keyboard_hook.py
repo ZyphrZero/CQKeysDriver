@@ -73,23 +73,19 @@ class KeyboardHook:
                 vk_code = kb_struct.vkCode
                 
                 # 按键按下
-                if wParam == win32con.WM_KEYDOWN:
-                    self.pressed_keys.add(vk_code)
-                    # 检查是否触发了任何热键组合
-                    for hotkey_combo, callback in self.hotkey_callbacks.items():
-                        if isinstance(hotkey_combo, tuple):
-                            # 组合键
-                            if all(key in self.pressed_keys for key in hotkey_combo):
-                                callback()
-                        else:
-                            # 单个键
-                            if vk_code == hotkey_combo:
+                if wParam in (win32con.WM_KEYDOWN, win32con.WM_SYSKEYDOWN):
+                    if vk_code not in self.pressed_keys:
+                        self.pressed_keys.add(vk_code)
+                        for hotkey_combo, callback in self.hotkey_callbacks.items():
+                            if isinstance(hotkey_combo, tuple):
+                                if vk_code in hotkey_combo and all(key in self.pressed_keys for key in hotkey_combo):
+                                    callback()
+                            elif vk_code == hotkey_combo:
                                 callback()
                 
                 # 按键释放
-                elif wParam == win32con.WM_KEYUP:
-                    if vk_code in self.pressed_keys:
-                        self.pressed_keys.remove(vk_code)
+                elif wParam in (win32con.WM_KEYUP, win32con.WM_SYSKEYUP):
+                    self.pressed_keys.discard(vk_code)
                 
             except Exception as e:
                 logging.error(f"键盘钩子回调错误: {str(e)}")
@@ -151,7 +147,12 @@ class KeyboardHook:
                 self._ready.set()
 
         self.hook_thread = threading.Thread(target=run_hook, daemon=True)
-        self.hook_thread.start()
+        try:
+            self.hook_thread.start()
+        except Exception:
+            if self.hook_thread.ident is None:
+                self.hook_thread = None
+            raise
         if not self._ready.wait(timeout=2):
             self._stop_requested.set()
             raise TimeoutError("热键线程启动超时，请停止后重试")
@@ -170,7 +171,12 @@ class KeyboardHook:
             # Keep the callback alive while Windows might still call it.
             raise TimeoutError("热键线程尚未退出，请稍后重试")
         if self.hook_id is not None:
-            raise self._hook_error or RuntimeError("热键钩子尚未移除")
+            if self._hook_error is not None:
+                error, self._hook_error = self._hook_error, None
+                raise error
+            if not self.user32.UnhookWindowsHookEx(self.hook_id):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.hook_id = None
         self.hook_thread = None
         self._hook_callback_ptr = None
         self.pressed_keys.clear()

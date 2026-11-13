@@ -6,7 +6,10 @@ import math
 import os
 from pathlib import Path
 import sys
-import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "cqkeyspy_test"))
+from input_tasks import (InputTasks, InputTaskCancelled, KEY_DOWN, KEY_UP, CONSUMER_DOWN, CONSUMER_UP,
+                         MOVE_RELATIVE, WAIT, action, milliseconds)
 
 
 DEFAULT_DLL = Path(__file__).resolve().parents[2] / "cqkeysdll/x64/Release/cqkeysdll.dll"
@@ -77,6 +80,7 @@ class CqKeys:
         version = self.native.GetLifecycleVersion()
         if version != 2:
             raise RuntimeError(f"需要 ABI v2 DLL，实际版本为 {version}")
+        self.tasks = InputTasks(self.native)
 
     def call(self, name, *arguments, boolean=False):
         ctypes.set_last_error(0)
@@ -102,25 +106,28 @@ class CqKeys:
             raise RuntimeError(f"设备未就绪，状态码：{status}")
         return status
 
-    def tap(self, usage, consumer=False):
+    def tap(self, usage, consumer=False, initial_delay=0):
         if not 1 <= usage <= (0x3ff if consumer else 0xff):
             raise ValueError("按键代码超出范围")
-        prefix = "ConsumerKey" if consumer else "Key"
-        self.call(prefix + "Down", usage)
-        try:
-            time.sleep(0.05)
-        finally:
-            self.call(prefix + "Up", usage)
+        steps = [action(WAIT, delay_ms=milliseconds(initial_delay))] if initial_delay else []
+        steps.extend([action(CONSUMER_DOWN if consumer else KEY_DOWN, usage, delay_ms=50),
+                      action(CONSUMER_UP if consumer else KEY_UP, usage)])
+        return self.tasks.run(steps)
 
-    def move(self, delta_x, delta_y):
+    def move(self, delta_x, delta_y, initial_delay=0):
         if not all(-32767 <= delta <= 32767 for delta in (delta_x, delta_y)):
             raise ValueError("演示的单次相对位移范围为 -32767 到 32767")
+        if initial_delay:
+            return self.tasks.run([action(WAIT, delay_ms=milliseconds(initial_delay)),
+                                   action(MOVE_RELATIVE, delta_x, delta_y)])
         self.call("MouseMoveRELATIVE", delta_x, delta_y)
 
     def close(self, uninstall=False):
         if self.needs_cleanup:
+            self.tasks.collect()
             operation = "UnloadNTDriver" if uninstall else "StopNTDriver"
             self.call(operation, b"cqkeys", boolean=True)
+            self.tasks.cleanup()
             self.needs_cleanup = False
 
 
@@ -164,19 +171,21 @@ def main(argv=None):
         print(f"设备已连接，ABI=2，状态={status}（READY）")
         if args.tap_key is not None or args.move is not None or args.consumer is not None:
             print(f"将在 {args.delay:g} 秒后发送输入，请将焦点放到测试窗口。")
-            time.sleep(args.delay)
             if args.tap_key is not None:
-                client.tap(args.tap_key)
+                client.tap(args.tap_key, initial_delay=args.delay)
             elif args.move is not None:
-                client.move(*args.move)
+                client.move(*args.move, initial_delay=args.delay)
             else:
-                client.tap(args.consumer, consumer=True)
+                client.tap(args.consumer, consumer=True, initial_delay=args.delay)
             print("输入请求已成功提交；是否被目标程序接收需现场确认。")
         else:
             print("状态检查完成，未发送测试按键、鼠标移动或媒体键。")
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, InputTaskCancelled) as error:
         print("测试已取消。", file=sys.stderr)
         exit_code = 130
+        if error.__cause__ is not None:
+            print(f"中断后任务清理失败：{error.__cause__}", file=sys.stderr)
+            exit_code = 1
     except (OSError, RuntimeError, ValueError, AttributeError) as error:
         print(f"测试失败：{error}", file=sys.stderr)
         if isinstance(error, DriverCallError) and error.code == 3010:

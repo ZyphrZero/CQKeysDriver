@@ -70,10 +70,10 @@ namespace CqKeys
                     if (!Native.LoadNTDriver(driverName, Path.GetFullPath(driverPath)))
                     {
                         int error = Marshal.GetLastWin32Error();
-                        throw new Win32Exception(error, "驱动启动失败");
+                        throw CreateDriverException(error, "LoadNTDriver 驱动启动失败");
                     }
                     if (!Native.SetHandle())
-                        throw new Win32Exception(Marshal.GetLastWin32Error(), "连接驱动设备失败");
+                        throw CreateDriverException(Marshal.GetLastWin32Error(), "SetHandle 连接驱动设备失败");
                     return true;
                 });
             }
@@ -90,7 +90,7 @@ namespace CqKeys
                 await Task.Run(() =>
                 {
                     if (!Native.UnloadNTDriver(driverName))
-                        throw new Win32Exception(Marshal.GetLastWin32Error(), "驱动卸载失败，可重试");
+                        throw CreateDriverException(Marshal.GetLastWin32Error(), "UnloadNTDriver 驱动卸载失败");
                 });
                 needsCleanup = false;
                 return true;
@@ -107,11 +107,19 @@ namespace CqKeys
             try
             {
                 if (needsCleanup && !Native.StopNTDriver("cqkeys"))
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "驱动停止失败");
+                    throw CreateDriverException(Marshal.GetLastWin32Error(), "StopNTDriver 驱动停止失败");
                 needsCleanup = false;
                 disposed = true;
             }
             finally { operations.Release(); }
+        }
+
+        private static Win32Exception CreateDriverException(int error, string operation)
+        {
+            string message = $"{operation}（Win32 {error}, 0x{error:X8}）：{new Win32Exception(error).Message}";
+            if (error == 3010)
+                message += " 需要重启 Windows 后重试；程序不会自动重启。";
+            return new Win32Exception(error, message);
         }
     }
 }

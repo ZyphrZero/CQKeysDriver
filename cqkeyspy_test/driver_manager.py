@@ -7,11 +7,13 @@ from threading import RLock
 import json
 import sys
 import ctypes
+from input_tasks import InputTasks
 
 
 class DriverManager:
     def __init__(self):
         self.driver = None
+        self.tasks = None
         self._lock = RLock()
         self._setup_logging()
         
@@ -30,7 +32,7 @@ class DriverManager:
         config_file = "driver_config.json"
         if os.path.exists(config_file):
             try:
-                with open(config_file, "r") as f:
+                with open(config_file, "r", encoding="utf-8") as f:
                     config = json.load(f)
                     dll_path = dll_path or config.get("dll_path")
                     sys_path = sys_path or config.get("sys_path")
@@ -144,6 +146,7 @@ class DriverManager:
                         function.restype = None
                 native.CheckDeviceStatus.argtypes = []
                 native.CheckDeviceStatus.restype = None
+                self.tasks = InputTasks(native)
                 self.driver = native
                 if not self.driver.LoadNTDriver(b'cqkeys', self.sys_path.encode('mbcs')):
                     error = ctypes.get_last_error()
@@ -158,7 +161,7 @@ class DriverManager:
                 return False
 
     def stop_input(self):
-        """阻止新输入并释放本 DLL 会话记录的按键；失败必须交给调用方。"""
+        """建立内核停止屏障并释放会话输入；失败必须交给调用方。"""
         with self._lock:
             if self.driver is not None and not self.driver.StopInputProcessing():
                 raise ctypes.WinError(ctypes.get_last_error())
@@ -168,10 +171,15 @@ class DriverManager:
         with self._lock:
             if self.driver is None:
                 return
+            if self.tasks is not None:
+                self.tasks.collect()
             operation = self.driver.UnloadNTDriver if uninstall else self.driver.StopNTDriver
             if not operation(b'cqkeys'):
                 raise ctypes.WinError(ctypes.get_last_error())
+            if self.tasks is not None:
+                self.tasks.cleanup()
             self.driver = None
+            self.tasks = None
             logging.info("驱动管理会话已清理，驱动包保留" if uninstall else "驱动管理会话已停止")
 
     def get_driver(self):

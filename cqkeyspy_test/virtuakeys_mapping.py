@@ -112,7 +112,7 @@ class VirtualKeys:
         'clear_key': 0xFE,
         
         # 符号键
-        '+': 0xBB,
+        '=': 0xBB,
         ',': 0xBC,
         '-': 0xBD,
         '.': 0xBE,
@@ -224,9 +224,7 @@ class VirtualKeys:
     @classmethod
     def is_valid_key(cls, key):
         """检查是否是有效的按键"""
-        if key == ' ':  # 空格字符特殊处理
-            return True
-        return key.lower() in cls.VK_CODE
+        return cls.get_vk_code(key) is not None
     
     @classmethod
     def needs_shift(cls, char):

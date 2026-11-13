@@ -20,6 +20,7 @@ namespace CqKeys
             DriverPathText.Text = $"驱动路径: {_driverService.DriverPath}";
             
             UpdateButtonStates();
+            _driverService.CheckDeploymentFiles();
         }
 
         private void DriverService_StatusChanged(object sender, string message)
@@ -95,14 +96,33 @@ namespace CqKeys
             try
             {
                 await _driverService.UninstallDriverAsync();
-                closeAllowed = true;
+                _ = Dispatcher.BeginInvoke(new Action(CompleteClose));
+            }
+            catch (Exception error)
+            {
+                operationPending = false;
+                UpdateButtonStates();
+                MessageBox.Show($"关闭失败，窗口保留以便重试：{error.Message}", "关闭失败");
+            }
+        }
+
+        private void CompleteClose()
+        {
+            closeAllowed = true;
+            try
+            {
                 Close();
             }
             catch (Exception error)
             {
-                MessageBox.Show($"卸载失败，窗口保留以便重试：{error.Message}", "卸载失败");
+                MessageBox.Show($"关闭窗口时发生错误：{error.Message}", "关闭失败");
             }
-            finally { operationPending = false; UpdateButtonStates(); }
+            finally
+            {
+                closeAllowed = false;
+                operationPending = false;
+                UpdateButtonStates();
+            }
         }
 
         protected override void OnClosed(EventArgs e)

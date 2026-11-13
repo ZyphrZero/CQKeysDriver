@@ -1,4 +1,5 @@
 ﻿using System.Windows;
+using System;
 
 namespace CqKeys
 {
@@ -10,7 +11,17 @@ namespace CqKeys
         {
             base.OnStartup(e);
 
-            _driverService = new DriverService();
+            try
+            {
+                _driverService = new DriverService();
+            }
+            catch (UnauthorizedAccessException)
+            {
+                MessageBox.Show("需要管理员权限才能操作驱动。\n请以管理员身份运行程序。",
+                    "权限错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                Shutdown(1);
+                return;
+            }
             
             MainWindow = new MainWindow(_driverService);
             MainWindow.Show();

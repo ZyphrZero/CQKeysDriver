@@ -8,6 +8,24 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <cstdlib>
+#include <new>
+
+namespace allocation_fault {
+    bool armed = false;
+}
+
+__declspec(noinline) void* operator new(std::size_t size) {
+    if (allocation_fault::armed) {
+        allocation_fault::armed = false;
+        throw std::bad_alloc();
+    }
+    if (void* memory = std::malloc(size ? size : 1)) return memory;
+    throw std::bad_alloc();
+}
+
+__declspec(noinline) void operator delete(void* memory) noexcept { std::free(memory); }
+__declspec(noinline) void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 namespace fake {
     HDEVINFO set = reinterpret_cast<HDEVINFO>(1);
@@ -15,6 +33,7 @@ namespace fake {
     HANDLE leaseHandle = reinterpret_cast<HANDLE>(3);
     bool exists = false, enabled = false, registered = false, restart = false, removalPending = false;
     bool wrongHardware = false, wrongClass = false, leaseExists = false;
+    bool failLeaseClose = false;
     DWORD openError = 0, copyError = 0, selectError = 0, installError = 0, removeError = 0;
     DWORD state = 0, installFlags = 0;
     int creations = 0, installs = 0, copies = 0;
@@ -24,6 +43,7 @@ namespace fake {
     BOOL error(DWORD value) { SetLastError(value); return FALSE; }
     void reset() {
         exists = enabled = registered = restart = removalPending = wrongHardware = wrongClass = leaseExists = false;
+        failLeaseClose = false;
         openError = copyError = selectError = installError = removeError = state = installFlags = 0;
         creations = installs = copies = 0; ticks = 0; inspectedPath.clear();
     }
@@ -107,14 +127,19 @@ namespace fake {
         if (!detail) { *required = sizeof(*detail) + 128; return error(ERROR_INSUFFICIENT_BUFFER); }
         wcscpy_s(detail->DevicePath, 64, L"test-interface"); return TRUE;
     }
-    HANDLE WINAPI openFile(LPCWSTR path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) {
+    HANDLE WINAPI openFile(LPCWSTR path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES,
+                          DWORD disposition, DWORD flags, HANDLE) {
         if (openError) { SetLastError(openError); return INVALID_HANDLE_VALUE; }
-        if (wcscmp(path, L"test-interface") || access != (GENERIC_READ | GENERIC_WRITE) || share) {
+        if (wcscmp(path, L"test-interface") || access != (GENERIC_READ | GENERIC_WRITE) || share ||
+            disposition != OPEN_EXISTING || flags != FILE_FLAG_OVERLAPPED) {
             SetLastError(ERROR_INVALID_PARAMETER); return INVALID_HANDLE_VALUE;
         }
         return deviceHandle;
     }
-    BOOL WINAPI close(HANDLE) { return TRUE; }
+    BOOL WINAPI close(HANDLE handle) {
+        if (handle == leaseHandle && failLeaseClose) return error(ERROR_ACCESS_DENIED);
+        return TRUE;
+    }
     CONFIGRET WINAPI status(PULONG flags, PULONG problem, DEVINST, ULONG) {
         *flags = enabled ? DN_STARTED : DN_HAS_PROBLEM;
         *problem = enabled ? 0 : CM_PROB_DISABLED;
@@ -171,6 +196,36 @@ void check(bool condition, const char* message) {
 
 int main() {
     fake::reset();
+    bool escaped = false;
+    BOOL installed = TRUE;
+    allocation_fault::armed = true;
+    try { installed = CqInstallDevice("C:\\test\\cqkeys.inf"); }
+    catch (const std::bad_alloc&) { escaped = true; }
+    allocation_fault::armed = false;
+    check(!escaped && !installed && GetLastError() == ERROR_NOT_ENOUGH_MEMORY && fake::installs == 0,
+        "path allocation failure stays inside the BOOL API");
+    fake::reset(); fake::exists = fake::enabled = true;
+    escaped = false;
+    HANDLE interfaceHandle = nullptr;
+    allocation_fault::armed = true;
+    try { interfaceHandle = CqOpenInterface(); }
+    catch (const std::bad_alloc&) { escaped = true; }
+    allocation_fault::armed = false;
+    check(!escaped && interfaceHandle == INVALID_HANDLE_VALUE && GetLastError() == ERROR_NOT_ENOUGH_MEMORY,
+        "interface allocation failure returns a Win32 error");
+    fake::reset();
+    std::string oversizedPath(MAX_PATH + 1, 'a');
+    oversizedPath += ".inf";
+    escaped = false;
+    installed = TRUE;
+    allocation_fault::armed = true;
+    try { installed = CqInstallDevice(oversizedPath.c_str()); }
+    catch (const std::bad_alloc&) { escaped = true; }
+    bool rejectedBeforeAllocation = allocation_fault::armed;
+    allocation_fault::armed = false;
+    check(!escaped && !installed && rejectedBeforeAllocation && GetLastError() == ERROR_FILENAME_EXCED_RANGE,
+        "oversized package path is rejected before allocation");
+    fake::reset();
     check(!CqInstallDevice(nullptr) && GetLastError() == ERROR_INVALID_PARAMETER, "null path fails before PnP");
     check(!CqInstallDevice("C:\\test\\cqkeys.dll") && fake::creations == 0, "unsupported extension does not create node");
     fake::wrongClass = true;
@@ -214,9 +269,13 @@ int main() {
     check(!CqAcquireSession() && GetLastError() == ERROR_BUSY, "cross-process lease rejects existing event");
     fake::leaseExists = false;
     check(CqAcquireSession() && CqAcquireSession(), "owned lease can be reused");
-    CqReleaseSession();
+    fake::failLeaseClose = true;
+    check(!CqReleaseSession() && g_sessionLease == fake::leaseHandle && GetLastError() == ERROR_ACCESS_DENIED,
+        "failed lease close retains ownership for retry");
+    fake::failLeaseClose = false;
+    check(CqReleaseSession(), "failed lease close can be retried");
     check(CqAcquireSession(), "released lease can be acquired again");
-    CqReleaseSession();
+    check(CqReleaseSession() && CqReleaseSession(), "completed lease release is idempotent");
     if (failures) return 1;
     std::cout << "Native SetupAPI/PnP boundary tests passed (all device operations simulated)\n";
     return 0;

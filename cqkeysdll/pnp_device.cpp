@@ -7,6 +7,7 @@
 #include <sddl.h>
 #include <string>
 #include <vector>
+#include <new>
 
 namespace {
     const GUID kSystemClass = {0x4d36e97d, 0xe325, 0x11ce, {0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}};
@@ -71,6 +72,7 @@ namespace {
         if (!path || !*path) return Error(ERROR_INVALID_PARAMETER);
         int length = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, path, -1, nullptr, 0);
         if (!length) return FALSE;
+        if (length > MAX_PATH) return Error(ERROR_FILENAME_EXCED_RANGE);
         std::vector<wchar_t> wide(length);
         if (!MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, path, -1, wide.data(), length)) return FALSE;
         wchar_t full[MAX_PATH];
@@ -108,12 +110,13 @@ BOOL CqAcquireSession() {
     return TRUE;
 }
 
-void CqReleaseSession() {
-    if (g_sessionLease) CloseHandle(g_sessionLease);
+BOOL CqReleaseSession() {
+    if (g_sessionLease && !CloseHandle(g_sessionLease)) return FALSE;
     g_sessionLease = nullptr;
+    return TRUE;
 }
 
-HANDLE CqOpenInterface() {
+HANDLE CqOpenInterface() try {
     DeviceInfoSet devices(SetupDiGetClassDevsW(&GUID_DEVINTERFACE_CQKEYS, nullptr, nullptr,
         DIGCF_PRESENT | DIGCF_DEVICEINTERFACE));
     if (devices.value == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
@@ -132,10 +135,13 @@ HANDLE CqOpenInterface() {
     detail->cbSize = sizeof(*detail);
     if (!SetupDiGetDeviceInterfaceDetailW(devices.value, &interfaceData, detail, bytes, nullptr, nullptr))
         return INVALID_HANDLE_VALUE;
-    return CreateFileW(detail->DevicePath, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    return CreateFileW(detail->DevicePath, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+} catch (const std::bad_alloc&) {
+    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    return INVALID_HANDLE_VALUE;
 }
 
-BOOL CqInstallDevice(const char* path) {
+BOOL CqInstallDevice(const char* path) try {
     std::wstring infPath;
     if (!PackagePath(path, infPath)) return FALSE;
     if (!CheckNoOpenSession()) return FALSE;
@@ -183,6 +189,8 @@ BOOL CqInstallDevice(const char* path) {
         Sleep(50);
     }
     return Error(ERROR_TIMEOUT);
+} catch (const std::bad_alloc&) {
+    return Error(ERROR_NOT_ENOUGH_MEMORY);
 }
 
 BOOL CqChangeDevice(bool remove) {

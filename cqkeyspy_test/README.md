@@ -1,173 +1,96 @@
-# CqKeys DLL 接口文档
+# CqKeys DLL 与 Python 调用
 
-接口使用 KMDF + VHF **ABI v2**，需要同版本 DLL 和包含 INF/SYS/CAT 的正确签名包。
-安装、权限、输入范围和验收限制见
-[项目说明](../README.md) 与 [生命周期契约](../docs/runtime-unload.md)。
+使用 x64 DLL，生命周期 ABI 为 2，线协议为 3.0。需要支持所需能力且正确签名的完整 INF/SYS/CAT 包。
+部署、权限、内核协议和隔离验收见 [项目说明](../README.md) 与 [生命周期契约](../docs/runtime-unload.md)。
+正式 C ABI 的字段和签名以 `cqkeysdll/cqkeys.h` 为准。
 
-## 接口列表
+## 生命周期
 
-### 驱动管理接口
+| API | 语义 |
+|---|---|
+| GetLifecycleVersion | 返回 2，不是 SYS 产品版本或线协议版本 |
+| LoadNTDriver(name,path) | 显式安装/启用固定节点；name 仅支持 cqkeys，SYS 路径用于定位同目录 INF |
+| SetHandle | 连接已启用设备、验证能力、建立全新中性会话 |
+| StopInputProcessing | 内核会话停止屏障，保留句柄；成功后同一会话不能重新输入 |
+| StopNTDriver(name) | 停止/释放/关闭，然后禁用节点，保留包 |
+| UnloadNTDriver(name) | 停止/释放/关闭，然后移除节点，保留包 |
+| CleanupInputRuntime | 显式收束 DLL 输入运行时和连接，不执行 PnP 禁用/移除 |
+| GetDriverHandle | 仅借用；禁止关闭、直接发报告或跨进程转移 |
 
-| 函数名 | 参数列表 | 返回值类型 | 功能描述 | 示例 |
-|--------|----------|------------|----------|------|
-| LoadNTDriver | const char* name, const char* path | BOOL | 安装/启用固定 PnP 节点；SYS 路径要求同目录 INF | LoadNTDriver("cqkeys", "cqkeys.inf") |
-| StopNTDriver | const char* name | BOOL | 释放输入并禁用节点，保留包 | StopNTDriver("cqkeys") |
-| UnloadNTDriver | const char* name | BOOL | 移除节点，保留 Driver Store 包 | UnloadNTDriver("cqkeys") |
-| GetLifecycleVersion | void | DWORD | 必须为 2 | GetLifecycleVersion() |
-| StopInputProcessing | void | BOOL | 拒绝新输入并复位，保留句柄 | StopInputProcessing() |
-| SetHandle | void | BOOL | 设置驱动句柄 | SetHandle() |
-| GetDriverHandle | void | HANDLE | 获取驱动句柄 | GetDriverHandle() |
-| GetDriverStatus | void | DEVICE_STATUS | 获取驱动状态 | GetDriverStatus() |
-| GetLastCheckTime | void | ULONGLONG | 获取上次检查时间 | GetLastCheckTime() |
+失败必须保留管理对象供重试；初始化失败也可能已经拥有需要收尾的资源。
+停止 GUI 时同时取消本地工作并在后台立即请求原生屏障，收到真实结果后再等待工作退出、执行设备管理。
+只有明确的设备断连/不存在错误（1167/433）允许在保留原错误的情况下继续等待工作退出并执行管理清理；
+其他停止错误仍阻止管理清理。GUI 分别展示“输入释放未确认”和管理清理结果，不将移除节点视为输入释放成功。
+管理清理失败保留对象及两种错误供重试；管理清理完成后，关闭窗口前仍显示未确认释放警告。
+不要用 GUI 线程等待驱动或用固定延时猜测完成。
 
-### 键盘操作接口
+`FreeLibrary` 前必须完成所有并发 API 调用，停止/等待任务、释放任务对象并显式清理运行时。
+`DllMain` 不负责等待、设备管理或卸载。未完成清理就卸载 DLL 不受支持。
 
-| 函数名 | 参数列表 | 返回值类型 | 功能描述 | 示例 |
-|--------|----------|------------|----------|------|
-| KeyDown | USHORT VirtualKey | void | 模拟键盘按键按下 | KeyDown(0x41) // 按下A键 |
-| KeyUp | USHORT VirtualKey | void | 模拟键盘按键抬起 | KeyUp(0x41) // 抬起A键 |
-| ConsumerKeyDown | USHORT usage | void | 按下 Consumer Control usage | ConsumerKeyDown(0xCD) |
-| ConsumerKeyUp | USHORT usage | void | 释放同一 Consumer Control usage | ConsumerKeyUp(0xCD) |
+## Primitive 输入兼容接口
 
-### 鼠标操作接口
+- `KeyDown/KeyUp(USHORT virtualKey)`：Windows VK；普通键最多 6 个，左右修饰键独立。
+- `ConsumerKeyDown/ConsumerKeyUp(USHORT usage)`：一个 Consumer usage，0x0001–0x03ff。
+- `MouseMoveRELATIVE(LONG dx,LONG dy)`：原始 HID 计数，大位移拆成固定报告；失败不自动重放。
+- `MouseMoveABSOLUTE(LONG x,LONG y)`：主显示器像素坐标，不是虚拟多屏或 Unicode 输入接口。
+- Left/Right/Middle/XButton1/XButton2 的 Down/Up：保留其他已按鼠标按钮。
+- `MouseWheelUp/Down(USHORT delta)`：Windows 120 单位的整数倍，每次最多 127 格。
 
-| 函数名 | 参数列表 | 返回值类型 | 功能描述 | 示例 |
-|--------|----------|------------|----------|------|
-| MouseMoveRELATIVE | LONG dx, LONG dy | void | 鼠标相对移动 | MouseMoveRELATIVE(10, 20) |
-| MouseMoveABSOLUTE | LONG dx, LONG dy | void | 主显示器像素坐标；不支持虚拟多屏绝对定位 | MouseMoveABSOLUTE(100, 200) |
-| MouseLeftButtonDown | void | void | 鼠标左键按下 | MouseLeftButtonDown() |
-| MouseLeftButtonUp | void | void | 鼠标左键抬起 | MouseLeftButtonUp() |
-| MouseRightButtonDown | void | void | 鼠标右键按下 | MouseRightButtonDown() |
-| MouseRightButtonUp | void | void | 鼠标右键抬起 | MouseRightButtonUp() |
-| MouseMiddleButtonDown | void | void | 鼠标中键按下 | MouseMiddleButtonDown() |
-| MouseMiddleButtonUp | void | void | 鼠标中键抬起 | MouseMiddleButtonUp() |
-| MouseXButton1Down | void | void | 鼠标X1键按下 | MouseXButton1Down() |
-| MouseXButton1Up | void | void | 鼠标X1键抬起 | MouseXButton1Up() |
-| MouseXButton2Down | void | void | 鼠标X2键按下 | MouseXButton2Down() |
-| MouseXButton2Up | void | void | 鼠标X2键抬起 | MouseXButton2Up() |
-| MouseWheelUp | USHORT wheelDelta | void | 鼠标滚轮向上 | MouseWheelUp(120) |
-| MouseWheelDown | USHORT wheelDelta | void | 鼠标滚轮向下 | MouseWheelDown(120) |
+这些旧输入接口返回 void，必须立即读取线程 LastError。单次调用有序不代表多个调用自动组成原子组合键。
+多个旧调用线程共享 legacy 输入所有者，需要完整组合/取消语义时使用任务 API。
 
-## 状态码说明
+## 有限动作任务
 
-### DEVICE_STATUS 枚举值
-| 值 | 含义 |
-|----|------|
-| DEVICE_STATUS_UNKNOWN (0) | 设备状态未知 |
-| DEVICE_STATUS_READY (1) | 设备就绪 |
-| DEVICE_STATUS_ERROR (2) | 设备错误 |
+任务在 DLL 中执行，SYS 不接收宏或动作数组。保留一个有界任务对象；前一个任务结束并 Release 后才提交下一个。
+任务运行时 primitive 冲突返回 `ERROR_BUSY`；legacy 仍持键时不能启动任务，防止互相释放输入。
 
-## 使用注意事项
-1. 使用前必须先调用 `LoadNTDriver` 加载驱动
-2. 加载驱动后需要调用 `SetHandle` 获取设备句柄
-3. 所有操作前建议通过 `GetDriverStatus` 检查驱动状态
-4. 程序退出前应调用 `UnloadNTDriver` 卸载驱动
-5. 鼠标移动坐标使用屏幕坐标系(左上角为原点)
-6. 键盘操作使用Windows虚拟键码(Virtual-Key Codes)
+`CqInputAction` 为 16 字节：`type:u32 / value1:i32 / value2:i32 / delayMs:u32`。
+delayMs 是该动作之后的可取消等待；它不是设备已收到输入的证明。
 
-## 错误处理
-- 所有返回BOOL类型的函数，返回FALSE表示操作失败；void 输入接口也须立即读取本次 GetLastError
-- 失败时可通过 `GetLastError()` 获取具体错误码
-- 建议实现错误重试机制，特别是对于驱动加载和设备句柄获取操作
+| type | 含义 | value1 / value2 |
+|---|---|---|
+| 1 / 2 | Key Down / Up | VK / 0 |
+| 3 / 4 | Consumer Down / Up | usage / 0 |
+| 5 | 相对移动 | dx / dy |
+| 6 | 主屏绝对移动 | x / y |
+| 7 | 鼠标按钮完整快照 | 低 5 位按钮 / 0 |
+| 8 | 滚轮 | HID 格数 -127–127 / 0 |
+| 9 | 仅等待 | 0 / 0 |
 
-## 线程安全性
-- 所有接口都是线程安全的
-- 调用方仍需同步完整的按下/释放序列，避免多个任务交叉操作同一按键
-- 加载/卸载是同步操作，GUI 应在后台执行；卸载前先取消并等待自己的输入任务
+- `SubmitInputTask(actions,count,repeats,repeatDelayMs,outId)`：复制动作，启动用户态执行。
+- `CancelInputTask(id)`：请求取消；仍须等待终结并查询释放结果，不能把取消请求成功当成已释放。
+- `WaitInputTask(id,timeoutMs)`：只等待终结；超时返回失败及 `WAIT_TIMEOUT (258)`，任务仍可能在执行。
+- `QueryInputTask(id,result)`：结果结构须先设置正确 size/version；state、error、cleanupError 才决定任务结果。
+- `ReleaseInputTask(id)`：仅在结束后释放对象并收齐线程退出，运行中返回忙。
 
+任务结构版本为 1，结果 `CqInputTaskResult` 为 96 字节。
+state：1 Running、2 Completed、3 Cancelled、4 Failed。查询成功不等于任务成功。
+`completedActions` 只计完整完成的动作，失败动作可能已经提交部分报告；结合提交水位和真实错误判断，不能整段重放。
+`cleanupError` 单独报告释放失败，不能被取消状态覆盖。异步任务错误不会自动出现在发起线程的 LastError 中。
+resultFlags 的 1/2/4 位分别表示部分完成、不确定结果、取消；未知位及非零 reserved 是不兼容结果。
 
-## 调试&蓝屏分析
+资源边界：动作 1–4096 个，重复 1–65535 次，每动作等待及重复间隔 0–60000ms。零重复不是无限任务。
+需要长业务时由调用端管理明确的有限任务，不在内核增加通用调度器。不承诺硬实时精度。
 
-### WinDbg  
-1. 配置系统生成完整转储：
-```
-1. 右键"此电脑" -> 属性
-2. 高级系统设置 -> 高级 -> 启动和故障恢复 -> 设置
-3. 在"写入调试信息"下选择"完整内存转储"
-4. 确保"自动重新启动"已勾选
-```
-2. 安装调试工具：
-```
-1. 下载并安装 WDK (Windows Driver Kit)
-2. 安装 Windows SDK
-3. 安装 WinDbg (Windows Debugger)
-```
+## 错误与结果
 
-3. 使用 WinDbg 分析：
-```
-// 使用powershell管理员方式执行以下命令安装 WinDbg
-winget install Microsoft.WinDbg
+Python 使用 `ctypes.CDLL(path, use_last_error=True)`，C# 使用 `CallingConvention.Cdecl`、`SetLastError=true`。
+BOOL 失败和 void 输入错误都须立即读取本次错误，不能在其他调用之后再读取。
+`GetDetailedErrorCode` 是兼容接口，不是所有线程或异步任务的唯一结果通道。
 
-1. 打开 WinDbg
-2. File -> Open Crash Dump
-3. 选择 C:\Windows\MEMORY.DMP 或 Minidump 文件
-```
-4. 在命令窗口输入：
-```
-   !analyze -v    # 详细分析崩溃原因
-   .bugcheck      # 显示蓝屏代码
-   kb             # 显示调用栈
-   lmvm cqkeys    # 显示我们的驱动信息
-```
+`QueryDriverInfo` 返回独立的协议、驱动版本、能力和报告边界；`QueryInputState` 返回驱动权威状态与清理结果。
+二者需要当前连接，但查询结果不会把旧文件绑定刷新为新代际。
+`GetLastInputResult` 读取调用线程最近一次 primitive 输入的结构化结果，调用前设置 size=48、version=1。
+其中 confirmedReports/confirmedX/confirmedY/lastSequence 描述已确认提交部分，flags 区分部分完成、不确定和取消。
+相对移动返回已确认的相对量，绝对移动成功返回所提交的主屏坐标；没有确认的部分不能靠补发猜测。
+读取结果或状态不会把最近输入结构中的真实错误改写为成功。
 
-### 2. BlueScreenView
-1. 使用 BlueScreenView（更简单的方法）：
-```
-1. 下载并安装 BlueScreenView
-2. 运行后自动显示所有蓝屏记录
-3. 查看：
-   - 蓝屏代码
-   - 发生时间
-   - 导致崩溃的驱动
-   - 调用栈信息
-```
-2. 在驱动代码中添加详细日志
-```
-KdPrint(("Driver State: %d, IRQL: %d\n", state, KeGetCurrentIrql()));
-```
+报告成功仅表示 VHF 接受，停止成功仅表示驱动侧屏障和中性报告提交完成；不表示目标应用已经观察或处理。
+超时、失联、取消竞争或部分完成不会自动重试输入。清理失败只允许明确的收尾重试，不恢复旧持键。
+普通状态检查成功不得覆盖原操作失败或首次清理错误。
 
-3. 配置本地内核调试：
-```
-bcdedit /debug on
-bcdedit /dbgsettings local
-bcdedit /set TESTSIGNING ON
-```
+## 测试边界
 
-4. 收集到的信息应该包括：
-```
-需要提供的信息
-{
-    1. 基本信息:
-    - 蓝屏代码 (例如: 0x0000007E)
-    - 发生时间
-    - 系统版本
-    
-    2. 详细信息:
-    - 导致崩溃的驱动名称
-    - 崩溃时的调用栈
-    - 相关的内存地址
-    
-    3. 环境信息:
-    - 系统配置
-    - 已安装的驱动
-    - 硬件信息
-}
-```
-
-### 完整验证（推荐用于开发测试）
-verifier /flags 0xFF /driver cqkeys.sys
-
-### 基本验证（推荐用于日常测试）
-verifier /standard /driver cqkeys.sys
-
-### 内存验证（针对内存问题）
-verifier /flags 0x5 /driver cqkeys.sys
-
-### IRQL验证（针对IRQL问题）
-verifier /flags 0x2 /driver cqkeys.sys
-
-### 异常退出后处理
-
-重新启动 ABI v2 客户端取得管理会话，然后正常移除 PnP 设备；
-或由管理员在设备管理器中核实 `ROOT\CQKEYS_VHF\0000` 后单独处理该节点。
-设备清理仅针对该实例。详见生命周期契约中的隔离验收要求。
+Python 单元测试用模拟 DLL 验证绑定、结果传播、任务释放和 GUI 停止顺序，不运行真实输入。
+原生边界测试与生产状态核心测试也不能代替 WDF/VHF、签名、权限及电源恢复验收。
+真实设备与 Driver Verifier 等设置仅在单独授权的可恢复隔离环境操作；不通过关闭安全机制掩盖失败。
