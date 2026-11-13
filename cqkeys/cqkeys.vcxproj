@@ -72,14 +72,14 @@
     <Link>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
     </Link>
-    <DriverSign>
-      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
-    </DriverSign>
   </ItemDefinitionGroup>
   <ItemGroup>
     <Inf Include="cqkeys.inf" />
   </ItemGroup>
   <ItemDefinitionGroup>
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
     <Link>
       <AdditionalDependencies>vhfkm.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
