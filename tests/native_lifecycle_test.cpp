@@ -1,236 +1,316 @@
-// Exercises the real DLL implementation against a deterministic Win32 test adapter.
-// These tests never open SCM or a real device. They are not kernel integration tests.
 #include "../cqkeysdll/pch.h"
 #include "../cqkeysdll/cqkeys.h"
-#include <winsvc.h>
-#include <winternl.h>
+#include "../cqkeysdll/pnp_device.h"
+#include "../shared/cqkeys_protocol.h"
+#include "../shared/cqkeys_reports.h"
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
 #include <chrono>
 #include <vector>
-#include <string>
 #include <iostream>
 #include <cstring>
 
 namespace fake {
-    const auto scm = reinterpret_cast<SC_HANDLE>(1);
-    const auto service = reinterpret_cast<SC_HANDLE>(2);
-    const auto device = reinterpret_cast<HANDLE>(3);
-    DWORD state = SERVICE_RUNNING;
-    DWORD clock = 0;
-    int queries = 0, failQuery = 0, controls = 0, deletes = 0, starts = 0;
+    HANDLE device = reinterpret_cast<HANDLE>(3);
+    DWORD installError = 0, changeError = 0, openError = 0, resetError = 0;
+    uint32_t version = CQKEYS_PROTOCOL_VERSION, generation = 1;
+    DWORD statusBytes = sizeof(CqDeviceStatus);
+    int resets = 0, changes = 0, installs = 0, reports = 0, failReportAt = 0;
     std::atomic<int> closes{0};
-    bool exists = true, deleted = false, failRelease = false, holdPending = false;
-    bool failDelete = false, holdDeletion = false;
-    char registeredPath[MAX_PATH] = "C:\\test\\cqkeys.sys";
-    DWORD openError = 0;
-    int inputCalls = 0, failInputAt = 0;
-    std::vector<USHORT> keyFlags, mouseFlags;
+    bool failReset = false, failClose = false, leaseBusy = false, lease = false, removed = false;
+    std::vector<CqReportRequest> submitted;
     std::mutex ioMutex;
     std::condition_variable ioCondition;
     bool blockIo = false, enteredIo = false, releaseIo = false;
 
+    BOOL error(DWORD code) { SetLastError(code); return FALSE; }
     void reset() {
-        state = SERVICE_RUNNING; clock = 0; queries = failQuery = controls = deletes = closes = 0;
-        exists = true; deleted = failRelease = holdPending = false; openError = 0;
-        failDelete = holdDeletion = false; starts = 0;
-        inputCalls = failInputAt = 0;
-        keyFlags.clear(); mouseFlags.clear();
+        installError = changeError = openError = resetError = 0;
+        version = CQKEYS_PROTOCOL_VERSION;
+        generation = 1;
+        statusBytes = sizeof(CqDeviceStatus);
+        resets = changes = installs = reports = failReportAt = 0;
+        closes = 0;
+        failReset = failClose = leaseBusy = lease = removed = false;
+        submitted.clear();
         blockIo = enteredIo = releaseIo = false;
     }
-    SC_HANDLE WINAPI openManager(LPCSTR, LPCSTR, DWORD) { return scm; }
-    SC_HANDLE WINAPI openService(SC_HANDLE, LPCSTR, DWORD) {
-        if (openError || !exists) { SetLastError(openError ? openError : ERROR_SERVICE_DOES_NOT_EXIST); return nullptr; }
-        return service;
-    }
-    BOOL WINAPI query(SC_HANDLE, LPSERVICE_STATUS result) {
-        if (++queries == failQuery) { SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
-        if (state == SERVICE_STOP_PENDING && !holdPending && queries > 1) state = SERVICE_STOPPED;
-        *result = {}; result->dwServiceType = SERVICE_KERNEL_DRIVER; result->dwCurrentState = state;
+    BOOL WINAPI closeDevice(HANDLE handle) {
+        if (handle != device) return error(ERROR_INVALID_HANDLE);
+        if (failClose) return error(ERROR_INVALID_HANDLE);
+        ++closes;
         return TRUE;
     }
-    BOOL WINAPI control(SC_HANDLE, DWORD, LPSERVICE_STATUS result) {
-        ++controls; state = SERVICE_STOP_PENDING; result->dwCurrentState = state; return TRUE;
-    }
-    BOOL WINAPI remove(SC_HANDLE) {
-        ++deletes;
-        if (failDelete) { SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
-        deleted = true; return TRUE;
-    }
-    BOOL WINAPI closeService(SC_HANDLE handle) {
-        if (handle == service && deleted && !holdDeletion) exists = false;
-        SetLastError(ERROR_INVALID_HANDLE); // Cleanup must not overwrite the real error.
-        return TRUE;
-    }
-    int WINAPI dpi(HDC, int) { return 144; }
-    DWORD WINAPI attributes(LPCSTR) { return FILE_ATTRIBUTE_NORMAL; }
-    BOOL WINAPI config(SC_HANDLE, LPQUERY_SERVICE_CONFIGA result, DWORD size, LPDWORD needed) {
-        *needed = sizeof(QUERY_SERVICE_CONFIGA);
-        if (!size) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
-        *result = {}; result->dwServiceType = SERVICE_KERNEL_DRIVER;
-        result->lpBinaryPathName = registeredPath; return TRUE;
-    }
-    SC_HANDLE WINAPI create(SC_HANDLE, LPCSTR, LPCSTR, DWORD, DWORD, DWORD, DWORD,
-                            LPCSTR, LPCSTR, LPDWORD, LPCSTR, LPCSTR, LPCSTR) {
-        exists = true; state = SERVICE_STOPPED; return service;
-    }
-    BOOL WINAPI start(SC_HANDLE, DWORD, LPCSTR*) { ++starts; state = SERVICE_RUNNING; return TRUE; }
-    void WINAPI sleep(DWORD milliseconds) { clock += milliseconds; }
-    DWORD WINAPI ticks() { return clock; }
-    BOOL WINAPI closeDevice(HANDLE) { ++closes; return TRUE; }
-    HANDLE WINAPI openDevice(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) { return device; }
-    BOOL WINAPI io(HANDLE, DWORD code, LPVOID data, DWORD size, LPVOID, DWORD, LPDWORD returned, LPOVERLAPPED) {
-        if (returned) *returned = 0;
-        if (!data || !size) return TRUE;
-        if (++inputCalls == failInputAt) { SetLastError(ERROR_WRITE_FAULT); return FALSE; }
+    int WINAPI metrics(int index) { return index == SM_CXSCREEN ? 1920 : 1080; }
+    BOOL WINAPI io(HANDLE handle, DWORD code, LPVOID input, DWORD size, LPVOID output,
+                  DWORD outputSize, LPDWORD returned, LPOVERLAPPED) {
+        *returned = 0;
+        if (handle != device) return error(ERROR_INVALID_HANDLE);
+        if (code == IOCTL_CQKEYS_STATUS) {
+            if (input || size || outputSize != sizeof(CqDeviceStatus)) return error(ERROR_INVALID_PARAMETER);
+            *static_cast<CqDeviceStatus*>(output) = {sizeof(CqDeviceStatus), version, generation, 1, 0};
+            *returned = statusBytes;
+            return TRUE;
+        }
+        if (code == IOCTL_CQKEYS_RESET) {
+            ++resets;
+            if (resetError) return error(resetError);
+            return failReset ? error(ERROR_WRITE_FAULT) : TRUE;
+        }
+        if (code != IOCTL_CQKEYS_REPORT || size != sizeof(CqReportRequest)) return error(ERROR_INVALID_PARAMETER);
+        const auto& request = *static_cast<CqReportRequest*>(input);
+        if (!CqValidReport(request)) return error(ERROR_INVALID_PARAMETER);
+        if (request.generation != generation) return error(ERROR_DEVICE_NOT_CONNECTED);
+        if (++reports == failReportAt) return error(ERROR_WRITE_FAULT);
         {
             std::unique_lock<std::mutex> lock(ioMutex);
-            if (blockIo) { enteredIo = true; ioCondition.notify_all(); ioCondition.wait(lock, [] { return releaseIo; }); }
+            if (blockIo) {
+                enteredIo = true;
+                ioCondition.notify_all();
+                ioCondition.wait(lock, [] { return releaseIo; });
+            }
         }
-        if (code == IOCTL_KEYBOARD) {
-            auto input = static_cast<KEYBOARD_INPUT_DATA*>(data);
-            if (failRelease && (input->Flags & KEY_BREAK)) { SetLastError(ERROR_WRITE_FAULT); return FALSE; }
-            keyFlags.push_back(input->Flags);
-        } else if (code == IOCTL_MOUSE) {
-            mouseFlags.push_back(static_cast<MOUSE_INPUT_DATA*>(data)->ButtonFlags);
-        }
+        submitted.push_back(request);
         return TRUE;
     }
 }
 
-#undef OpenSCManager
-#undef CreateFile
-#define OpenSCManager fake::openManager
-#define OpenSCManagerA fake::openManager
-#define OpenServiceA fake::openService
-#define QueryServiceStatus fake::query
-#define QueryServiceConfigA fake::config
-#define CreateServiceA fake::create
-#define StartServiceA fake::start
-#define GetFileAttributesA fake::attributes
-#define ControlService fake::control
-#define DeleteService fake::remove
-#define CloseServiceHandle fake::closeService
+HANDLE CqOpenInterface() {
+    if (fake::openError) { SetLastError(fake::openError); return INVALID_HANDLE_VALUE; }
+    return fake::device;
+}
+BOOL CqInstallDevice(const char*) {
+    ++fake::installs;
+    return fake::installError ? fake::error(fake::installError) : TRUE;
+}
+BOOL CqChangeDevice(bool remove) {
+    ++fake::changes;
+    if (fake::changeError) return fake::error(fake::changeError);
+    fake::removed = remove;
+    return TRUE;
+}
+BOOL CqAcquireSession() {
+    if (fake::leaseBusy) return fake::error(ERROR_BUSY);
+    fake::lease = true;
+    return TRUE;
+}
+void CqReleaseSession() { fake::lease = false; }
+
 #define CloseHandle fake::closeDevice
-#define CreateFile fake::openDevice
-#define CreateFileA fake::openDevice
 #define DeviceIoControl fake::io
-#define GetDeviceCaps fake::dpi
-#define GetTickCount fake::ticks
-#define Sleep fake::sleep
+#define GetSystemMetrics fake::metrics
 #include "../cqkeysdll/cqkeysdll.cpp"
+#undef CloseHandle
+#undef DeviceIoControl
+#undef GetSystemMetrics
 
 int failures = 0;
 void check(bool condition, const char* message) {
     if (!condition) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
 }
+
+template<typename Report> Report lastReport() {
+    Report report{};
+    if (!fake::submitted.empty()) memcpy(&report, fake::submitted.back().report, sizeof(report));
+    return report;
+}
+
+void testDescriptor() {
+    unsigned reportBits[5]{};
+    unsigned reportId = 0, reportSize = 0, reportCount = 0, depth = 0, collections = 0;
+    for (size_t offset = 0; offset < sizeof(CqReportDescriptor);) {
+        unsigned prefix = CqReportDescriptor[offset++];
+        unsigned size = prefix & 3;
+        if (size == 3) size = 4;
+        check(offset + size <= sizeof(CqReportDescriptor), "descriptor item is bounded");
+        unsigned value = 0;
+        for (unsigned byte = 0; byte < size; ++byte) value |= CqReportDescriptor[offset++] << (8 * byte);
+        switch (prefix & 0xfc) {
+        case 0x84: reportId = value; break;
+        case 0x74: reportSize = value; break;
+        case 0x94: reportCount = value; break;
+        case 0x80:
+            check(reportId > 0 && reportId < 5, "descriptor report id is valid");
+            if (reportId < 5) reportBits[reportId] += reportSize * reportCount;
+            break;
+        case 0xa0: if (depth++ == 0) ++collections; break;
+        case 0xc0: check(depth > 0, "collections are balanced"); --depth; break;
+        }
+    }
+    check(depth == 0 && collections == 4, "four balanced HID top-level collections");
+    check(reportBits[1] == (sizeof(CqKeyboardReport) - 1) * 8, "keyboard descriptor matches wire layout");
+    check(reportBits[2] == (sizeof(CqMouseReport) - 1) * 8, "mouse descriptor matches wire layout");
+    check(reportBits[3] == (sizeof(CqAbsoluteReport) - 1) * 8, "absolute descriptor matches wire layout");
+    check(reportBits[4] == (sizeof(CqConsumerReport) - 1) * 8, "consumer descriptor matches wire layout");
+}
+
 int main() {
-    char name[] = "cqkeys";
-    fake::reset(); fake::failQuery = 2;
-    check(!UnloadNTDriver(name), "query failure must fail unload");
-    check(fake::deletes == 0, "query failure must not delete the service");
-    check(GetLastError() == ERROR_ACCESS_DENIED, "cleanup must preserve query error");
-
-    fake::reset(); fake::state = SERVICE_STOP_PENDING;
-    check(UnloadNTDriver(name), "already pending stop can finish");
-    check(fake::controls == 0, "do not resend STOP to a STOP_PENDING service");
-
-    fake::reset(); fake::openError = ERROR_ACCESS_DENIED;
-    check(!UnloadNTDriver(name), "access denied is not service absent");
-    check(GetLastError() == ERROR_ACCESS_DENIED, "preserve open-service error");
-    check(fake::deletes == 0, "access denied must not delete");
-
-    fake::reset(); fake::holdPending = true;
-    check(!UnloadNTDriver(name), "stop timeout must fail");
-    check(GetLastError() == ERROR_TIMEOUT, "stop timeout has an explicit error");
-    check(fake::deletes == 0, "timed-out service is not deleted");
-
-    fake::reset(); fake::failDelete = true;
-    check(!UnloadNTDriver(name), "delete failure must fail");
-    check(GetLastError() == ERROR_ACCESS_DENIED, "preserve deletion error");
-    fake::failDelete = false;
-    check(UnloadNTDriver(name), "deletion failure is retryable");
-    check(UnloadNTDriver(name), "unload is idempotent when service is absent");
-
-    fake::reset(); fake::holdDeletion = true;
-    check(!UnloadNTDriver(name), "marked for deletion is not deleted yet");
-    check(GetLastError() == ERROR_TIMEOUT, "held service handle causes deletion timeout");
+    char name[] = "cqkeys", path[] = "C:\\test\\cqkeys.inf", wrongName[] = "other";
+    testDescriptor();
+    fake::reset();
+    check(GetLifecycleVersion() == 2, "lifecycle ABI version is 2");
+    check(!LoadNTDriver(wrongName, path) && fake::installs == 0, "validate device name before installation");
+    fake::leaseBusy = true;
+    check(!LoadNTDriver(name, path) && GetLastError() == ERROR_BUSY, "another process owns the session");
+    check(UnloadNTDriver(name) && fake::changes == 0, "rejected client cannot remove another session");
+    fake::leaseBusy = false;
+    fake::installError = ERROR_SUCCESS_REBOOT_REQUIRED;
+    check(!LoadNTDriver(name, path) && GetLastError() == ERROR_SUCCESS_REBOOT_REQUIRED, "restart required is not ready");
+    check(UnloadNTDriver(name), "partial installation can be cleaned up");
 
     fake::reset();
-    char path[] = "C:\\test\\cqkeys.sys";
-    check(LoadNTDriver(name, path), "reuse running service");
-    check(fake::starts == 0 && fake::deletes == 0, "load does not restart or delete running service");
-    char otherPath[] = "C:\\test\\other.sys";
-    check(!LoadNTDriver(name, otherPath), "refuse existing service pointing at another binary");
-    check(GetLastError() == ERROR_SERVICE_EXISTS, "report service path conflict");
+    fake::version = 1;
+    check(!SetHandle() && GetLastError() == ERROR_REVISION_MISMATCH, "driver protocol mismatch is rejected");
+    check(fake::closes == 1, "failed handshake closes handle");
+    check(UnloadNTDriver(name), "cleanup mismatched session");
+    fake::reset();
+    fake::statusBytes = 1;
+    check(!SetHandle() && GetLastError() == ERROR_REVISION_MISMATCH, "truncated status is rejected");
+    check(UnloadNTDriver(name), "cleanup truncated handshake");
 
-    check(SetHandle(), "open input session");
-    KeyDown('A'); MouseLeftButtonDown(); MouseXButton2Down();
-    check(StopNTDriver(name), "stop without deleting registration");
-    check(fake::deletes == 0 && fake::exists, "stop retains registration");
-    check(fake::closes == 1, "close device once");
-    check(fake::keyFlags.size() == 2 && fake::keyFlags.back() == KEY_BREAK, "release only held keys before stop");
-    check(fake::mouseFlags.size() == 4 && fake::mouseFlags.back() == MOUSE_BUTTON_5_UP, "release held mouse buttons");
-    auto sent = fake::keyFlags.size();
-    KeyDown('B');
-    check(fake::keyFlags.size() == sent, "reject input after stop");
-    check(LoadNTDriver(name, path) && SetHandle(), "stopped service can be loaded again");
-    check(UnloadNTDriver(name), "reloaded session can be uninstalled");
+    fake::reset();
+    check(LoadNTDriver(name, path) && SetHandle(), "load and open session");
+    check(!LoadNTDriver(name, path) && GetLastError() == ERROR_BUSY, "do not reinstall an active session");
+    KeyDown('A');
+    check(lastReport<CqKeyboardReport>().keys[0] == 4, "A maps to HID usage 4");
+    KeyDown(VK_LCONTROL); KeyDown(VK_RCONTROL); KeyUp(VK_LCONTROL);
+    check(lastReport<CqKeyboardReport>().modifiers == 0x10, "left/right modifiers remain distinct");
+    KeyDown(VK_LEFT); KeyDown(VK_NUMPAD4);
+    auto keyboard = lastReport<CqKeyboardReport>();
+    check(keyboard.keys[1] == 0x50 && keyboard.keys[2] == 0x5c, "navigation and numpad usages remain distinct");
+    KeyDown('B'); KeyDown('C'); KeyDown('D');
+    int before = fake::reports;
+    KeyDown('E');
+    check(GetLastError() == ERROR_TOO_MANY_CMDS && fake::reports == before, "reject seventh key without corrupting held state");
+    KeyUp('A'); KeyDown('E');
+    check(lastReport<CqKeyboardReport>().keys[0] == 8, "released slot can be reused");
+    KeyDown(0xffff);
+    check(GetLastError() == ERROR_NOT_SUPPORTED, "unsupported virtual key is explicit");
 
-    fake::reset(); check(SetHandle(), "open for release failure test");
-    KeyDown('A'); fake::failRelease = true;
-    check(!UnloadNTDriver(name), "failed key release prevents false unload success");
-    check(GetLastError() == ERROR_WRITE_FAULT, "preserve release error");
-    check(fake::closes == 0 && fake::controls == 0, "retain device for retry before stopping SCM");
-    check(!SetHandle(), "cannot reopen a partially drained session");
-    fake::failRelease = false;
-    check(UnloadNTDriver(name), "retry releases key and unloads");
+    MouseLeftButtonDown(); MouseXButton2Down(); MouseMoveRELATIVE(70000, -70000);
+    auto mouse = lastReport<CqMouseReport>();
+    check(mouse.buttons == 17 && mouse.x == 4466 && mouse.y == -4466, "split large motion preserving held buttons");
+    MouseWheelDown(240);
+    check(lastReport<CqMouseReport>().wheel == -2, "Windows wheel delta converts to HID detents");
+    MouseWheelUp(1);
+    check(GetLastError() == ERROR_INVALID_PARAMETER, "sub-detent input is not silently rounded");
+    MouseMoveABSOLUTE(1919, 1079);
+    auto absolute = lastReport<CqAbsoluteReport>();
+    check(absolute.x == 32767 && absolute.y == 32767, "absolute range maps full primary display");
+    MouseMoveABSOLUTE(-1, 10);
+    check(GetLastError() == ERROR_INVALID_PARAMETER, "out-of-range absolute coordinates are rejected");
 
-    fake::reset(); check(SetHandle(), "open for stop-input test");
-    KeyDown('A'); check(StopInputProcessing(), "quiesce input independently");
-    check(StopInputProcessing(), "quiesce input is idempotent");
-    check(fake::keyFlags.size() == 2 && fake::closes == 0, "stop input releases keys but retains handle");
-    check(UnloadNTDriver(name), "unload quiesced input");
+    KeyDown(VK_MEDIA_PLAY_PAUSE);
+    check(lastReport<CqConsumerReport>().usage == 0xcd, "media virtual key uses consumer collection");
+    ConsumerKeyDown(0xe9);
+    check(GetLastError() == ERROR_BUSY, "single consumer slot does not overwrite held key");
+    KeyUp(VK_MEDIA_PLAY_PAUSE);
+    check(lastReport<CqConsumerReport>().usage == 0, "consumer key release submits neutral report");
 
-    fake::reset(); check(SetHandle(), "open for multi-step input failure test");
-    fake::failInputAt = 1;
-    MouseMoveRELATIVE(100, 20);
-    check(GetLastError() == ERROR_WRITE_FAULT, "multi-step input preserves its first I/O error");
-    check(fake::inputCalls == 1, "failed move does not send a successful final correction");
-    fake::failInputAt = 0;
-    check(UnloadNTDriver(name), "unload after failed input");
+    auto request = fake::submitted.front();
+    request.version = 1;
+    check(!CqValidReport(request), "incompatible protocol version is rejected");
+    request = fake::submitted.front(); request.reportLength = 8;
+    check(!CqValidReport(request), "incorrect report length is rejected");
+    request = fake::submitted.front(); request.reserved[0] = 1;
+    check(!CqValidReport(request), "nonzero reserved bytes are rejected");
+    request = fake::submitted.front(); request.report[4] = 4;
+    check(!CqValidReport(request), "duplicate keyboard usages are rejected");
+    request = fake::submitted.back(); request.report[8] = 1;
+    check(!CqValidReport(request), "nonzero trailing report data is rejected");
+    request = {};
+    request.size = sizeof(request); request.version = CQKEYS_PROTOCOL_VERSION;
+    request.reportLength = sizeof(CqMouseReport); request.report[0] = CQKEYS_MOUSE_ID;
+    check(CqValidReport(request), "neutral mouse report is valid");
+    request.report[1] = 32;
+    check(!CqValidReport(request), "mouse button padding is rejected");
+    request.report[1] = 0; request.report[3] = 0x80;
+    check(!CqValidReport(request), "relative axis below descriptor minimum is rejected");
+    request.report[3] = 0; request.report[6] = 0x80;
+    check(!CqValidReport(request), "wheel below descriptor minimum is rejected");
+    request.report[6] = 0; request.reportLength = sizeof(CqAbsoluteReport);
+    request.report[0] = CQKEYS_ABSOLUTE_ID; request.report[2] = 0x80;
+    check(!CqValidReport(request), "absolute coordinate exceeds descriptor maximum");
+    request.report[2] = 0; request.reportLength = sizeof(CqConsumerReport);
+    request.report[0] = CQKEYS_CONSUMER_ID; request.report[2] = 4;
+    check(!CqValidReport(request), "consumer usage exceeds descriptor maximum");
+    request.report[2] = 0; request.report[0] = 0xff;
+    check(!CqValidReport(request), "unknown report id is rejected");
 
-    fake::reset(); check(SetHandle(), "open for concurrent I/O test");
+    fake::failReset = true;
+    check(!UnloadNTDriver(name) && GetLastError() == ERROR_WRITE_FAULT, "release failure prevents false unload success");
+    check(fake::changes == 0 && fake::closes == 0 && fake::lease, "retain handle and ownership for retry");
+    check(!SetHandle() && GetLastError() == ERROR_BUSY, "cannot bypass failed cleanup");
+    fake::failReset = false;
+    fake::changeError = ERROR_ACCESS_DENIED;
+    check(!UnloadNTDriver(name) && GetLastError() == ERROR_ACCESS_DENIED, "PnP removal failure propagates");
+    check(fake::closes == 1 && fake::lease, "retain session ownership after PnP failure");
+    fake::changeError = 0;
+    check(UnloadNTDriver(name) && !fake::lease, "removal failure is retryable");
+    check(UnloadNTDriver(name) && fake::changes == 2, "completed unload is idempotent");
+
+    fake::reset(); check(SetHandle(), "open failure propagation session");
+    fake::failReportAt = 1;
+    MouseMoveRELATIVE(70000, 20);
+    check(GetLastError() == ERROR_WRITE_FAULT && fake::reports == 1, "split motion stops at first failed report");
+    check(UnloadNTDriver(name), "close failed input session");
+
+    fake::reset(); check(SetHandle(), "open close failure session");
+    fake::failClose = true;
+    check(!StopNTDriver(name) && fake::changes == 0 && fake::lease, "failed handle close retains cleanup ownership");
+    fake::failClose = false;
+    check(StopNTDriver(name), "handle close failure is retryable");
+
+    fake::reset(); check(SetHandle(), "open quiesce session");
+    KeyDown('A');
+    check(StopInputProcessing() && StopInputProcessing(), "input quiesce is idempotent");
+    before = fake::reports; KeyDown('B');
+    check(GetLastError() == ERROR_NOT_READY && fake::reports == before && fake::closes == 0,
+        "quiesce blocks input while retaining device handle");
+    check(UnloadNTDriver(name), "unload quiesced session");
+
+    fake::reset(); check(SetHandle(), "open resume session");
+    KeyDown('A'); ++fake::generation; KeyDown('B');
+    check(GetLastError() == ERROR_DEVICE_NOT_CONNECTED && fake::submitted.size() == 1, "resume cannot replay pre-suspend key state");
+    check(!SetHandle(), "stale generation requires lifecycle restart");
+    check(UnloadNTDriver(name), "close stale generation");
+
+    fake::reset(); check(SetHandle(), "open surprise removal session");
+    fake::resetError = ERROR_DEVICE_NOT_CONNECTED;
+    check(!UnloadNTDriver(name) && GetLastError() == ERROR_DEVICE_NOT_CONNECTED,
+        "surprise removal does not pretend a successful key release");
+    check(fake::closes == 1 && fake::lease && fake::changes == 0, "retire disconnected handle but retain cleanup ownership");
+    check(UnloadNTDriver(name) && !fake::lease, "retry can finish after surprise removal instead of retaining stale handle");
+
+    fake::reset(); check(SetHandle(), "open concurrent I/O session");
     fake::blockIo = true;
     std::thread input([] { KeyDown('A'); });
     {
         std::unique_lock<std::mutex> lock(fake::ioMutex);
-        check(fake::ioCondition.wait_for(lock, std::chrono::seconds(2), [] { return fake::enteredIo; }), "input entered adapter");
+        check(fake::ioCondition.wait_for(lock, std::chrono::seconds(2), [] { return fake::enteredIo; }), "input entered I/O boundary");
     }
     std::atomic<bool> stopping{false}, stopped{false};
     std::thread stop([&] { stopping = true; check(UnloadNTDriver(name), "concurrent unload succeeds"); stopped = true; });
     while (!stopping) std::this_thread::yield();
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    check(fake::closes == 0 && !stopped, "handle remains open while input I/O is outstanding");
+    check(fake::closes == 0 && !stopped, "handle remains valid while input is outstanding");
     {
         std::lock_guard<std::mutex> lock(fake::ioMutex); fake::releaseIo = true;
     }
     fake::ioCondition.notify_all(); input.join(); stop.join();
-    check(fake::closes == 1 && fake::keyFlags.back() == KEY_BREAK, "drain input then release key and close");
+    check(fake::closes == 1 && fake::resets == 1, "drain then reset then close");
 
     for (int cycle = 0; cycle < 20; ++cycle) {
-        fake::reset(); fake::state = SERVICE_STOPPED;
-        check(LoadNTDriver(name, path) && SetHandle(), "repeated load opens session");
+        fake::reset();
+        check(LoadNTDriver(name, path) && SetHandle(), "repeat install/open");
         KeyDown('A');
-        check(StopNTDriver(name), "repeated stop retains registration");
-        check(LoadNTDriver(name, path) && SetHandle(), "repeated restart opens session");
-        check(UnloadNTDriver(name), "repeated unload deletes registration");
-        check(fake::closes == 2 && !fake::exists, "repeated cycle leaves no test device or service");
+        check(StopNTDriver(name) && !fake::removed, "stop disables without removing");
+        check(LoadNTDriver(name, path) && SetHandle(), "repeat re-enable/open");
+        check(UnloadNTDriver(name) && fake::removed && !fake::lease, "repeat removal releases ownership");
     }
-
     if (failures) return 1;
-    std::cout << "Native lifecycle tests passed\n";
+    std::cout << "Native VHF protocol and DLL lifecycle tests passed (no kernel device installed)\n";
     return 0;
 }

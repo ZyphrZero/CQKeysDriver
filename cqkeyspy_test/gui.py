@@ -23,7 +23,6 @@ import math
 import random
 from keyboard_hook import KeyboardHook
 
-# 添加 MONITORINFO 结构体定义
 class MONITORINFO(ctypes.Structure):
     _fields_ = [
         ("cbSize", wintypes.DWORD),
@@ -32,7 +31,6 @@ class MONITORINFO(ctypes.Structure):
         ("dwFlags", wintypes.DWORD)
     ]
 
-# 添加命令行参数解析
 # python gui.py --debug
 parser = argparse.ArgumentParser()
 parser.add_argument('--debug', action='store_true', help='启用调试模式')
@@ -495,7 +493,6 @@ class CQKeysGUI:
                   command=lambda: self._test_mouse_wheel("down"),
                   width=15).pack(pady=2)
 
-        # 添加自动移动设置区域
         auto_move_frame = ttk.LabelFrame(main_container, text="自动移动设置")
         auto_move_frame.pack(fill=tk.X, padx=5, pady=5)
 
@@ -593,7 +590,7 @@ class CQKeysGUI:
         self.log_text.configure(font=self.default_font)  # 使用全局字体
         
         # 放置文本框和滚动条
-        self.log_text.grid(row=0, column=0, sticky="nsew", padx=(5,0), pady=5)  # 添加内边距
+        self.log_text.grid(row=0, column=0, sticky="nsew", padx=(5,0), pady=5)
         self.log_scrollbar.grid(row=0, column=1, sticky="ns", pady=5)
         
         # 配置日志处理
@@ -678,7 +675,6 @@ class CQKeysGUI:
             except Exception as error:
                 self._cleanup_results.put(error)
 
-        # SCM may block; never wait for it on the Tk event-loop thread.
         threading.Thread(target=cleanup, daemon=True).start()
         self.root.after(25, self._poll_cleanup, close_after)
 
@@ -1453,7 +1449,6 @@ class CQKeysGUI:
                     messagebox.showerror("错误", "驱动状态异常")
                     return
 
-                # 添加3秒延时
                 logging.info("滚轮测试将在3秒后开始...")
                 self.input_workers.wait(3)
                     
@@ -1839,4 +1834,4 @@ if __name__ == '__main__':
         
     except Exception as e:
         # 其他未预期的错误
-        messagebox.showerror("错误", f"程序运行出错: {str(e)}") 
+        messagebox.showerror("错误", f"程序运行出错: {str(e)}")

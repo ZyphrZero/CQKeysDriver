@@ -1,13 +1,20 @@
 # CqKeys DLL 接口文档
 
+接口使用 KMDF + VHF **ABI v2**，需要同版本 DLL 和包含 INF/SYS/CAT 的正确签名包。
+安装、权限、输入范围和验收限制见
+[项目说明](../README.md) 与 [生命周期契约](../docs/runtime-unload.md)。
+
 ## 接口列表
 
 ### 驱动管理接口
 
 | 函数名 | 参数列表 | 返回值类型 | 功能描述 | 示例 |
 |--------|----------|------------|----------|------|
-| LoadNTDriver | char* lpszDriverName, char* lpszDriverPath | BOOL | 加载NT驱动程序 | LoadNTDriver("cqkeys", "cqkeys.sys") |
-| UnloadNTDriver | char* szSvrName | BOOL | 卸载NT驱动程序 | UnloadNTDriver("cqkeys") |
+| LoadNTDriver | const char* name, const char* path | BOOL | 安装/启用固定 PnP 节点；SYS 路径要求同目录 INF | LoadNTDriver("cqkeys", "cqkeys.inf") |
+| StopNTDriver | const char* name | BOOL | 释放输入并禁用节点，保留包 | StopNTDriver("cqkeys") |
+| UnloadNTDriver | const char* name | BOOL | 移除节点，保留 Driver Store 包 | UnloadNTDriver("cqkeys") |
+| GetLifecycleVersion | void | DWORD | 必须为 2 | GetLifecycleVersion() |
+| StopInputProcessing | void | BOOL | 拒绝新输入并复位，保留句柄 | StopInputProcessing() |
 | SetHandle | void | BOOL | 设置驱动句柄 | SetHandle() |
 | GetDriverHandle | void | HANDLE | 获取驱动句柄 | GetDriverHandle() |
 | GetDriverStatus | void | DEVICE_STATUS | 获取驱动状态 | GetDriverStatus() |
@@ -19,13 +26,15 @@
 |--------|----------|------------|----------|------|
 | KeyDown | USHORT VirtualKey | void | 模拟键盘按键按下 | KeyDown(0x41) // 按下A键 |
 | KeyUp | USHORT VirtualKey | void | 模拟键盘按键抬起 | KeyUp(0x41) // 抬起A键 |
+| ConsumerKeyDown | USHORT usage | void | 按下 Consumer Control usage | ConsumerKeyDown(0xCD) |
+| ConsumerKeyUp | USHORT usage | void | 释放同一 Consumer Control usage | ConsumerKeyUp(0xCD) |
 
 ### 鼠标操作接口
 
 | 函数名 | 参数列表 | 返回值类型 | 功能描述 | 示例 |
 |--------|----------|------------|----------|------|
 | MouseMoveRELATIVE | LONG dx, LONG dy | void | 鼠标相对移动 | MouseMoveRELATIVE(10, 20) |
-| MouseMoveABSOLUTE | LONG dx, LONG dy | void | 鼠标绝对移动 | MouseMoveABSOLUTE(100, 200) |
+| MouseMoveABSOLUTE | LONG dx, LONG dy | void | 主显示器像素坐标；不支持虚拟多屏绝对定位 | MouseMoveABSOLUTE(100, 200) |
 | MouseLeftButtonDown | void | void | 鼠标左键按下 | MouseLeftButtonDown() |
 | MouseLeftButtonUp | void | void | 鼠标左键抬起 | MouseLeftButtonUp() |
 | MouseRightButtonDown | void | void | 鼠标右键按下 | MouseRightButtonDown() |
@@ -57,14 +66,14 @@
 6. 键盘操作使用Windows虚拟键码(Virtual-Key Codes)
 
 ## 错误处理
-- 所有返回BOOL类型的函数，返回FALSE表示操作失败
+- 所有返回BOOL类型的函数，返回FALSE表示操作失败；void 输入接口也须立即读取本次 GetLastError
 - 失败时可通过 `GetLastError()` 获取具体错误码
 - 建议实现错误重试机制，特别是对于驱动加载和设备句柄获取操作
 
 ## 线程安全性
 - 所有接口都是线程安全的
-- 多线程环境下无需额外同步措施
-- 建议在主线程中进行驱动加载和卸载操作
+- 调用方仍需同步完整的按下/释放序列，避免多个任务交叉操作同一按键
+- 加载/卸载是同步操作，GUI 应在后台执行；卸载前先取消并等待自己的输入任务
 
 
 ## 调试&蓝屏分析
@@ -115,8 +124,6 @@ winget install Microsoft.WinDbg
 2. 在驱动代码中添加详细日志
 ```
 KdPrint(("Driver State: %d, IRQL: %d\n", state, KeGetCurrentIrql()));
-KdPrint(("Callback Address: 0x%p\n", callback));
-KdPrint(("Memory Region: 0x%p, Size: %d\n", address, size));
 ```
 
 3. 配置本地内核调试：
@@ -159,15 +166,8 @@ verifier /flags 0x5 /driver cqkeys.sys
 ### IRQL验证（针对IRQL问题）
 verifier /flags 0x2 /driver cqkeys.sys
 
-### 程序闪退cmd命令手动关闭服务
+### 异常退出后处理
 
-```
-sc query cqkeys
-sc stop cqkeys
-sc delete cqkeys
-
-或者执行快捷命令
-
-// 如果cqkeys 服务存在，则停止并删除
-@echo off && sc query cqkeys > nul 2>&1 && (echo Service exists, stopping... && sc stop cqkeys > nul 2>&1 && timeout /t 2 /nobreak > nul && sc delete cqkeys > nul 2>&1 && echo Service deleted successfully && exit) || (echo Service does not exist && exit)
-```
+重新启动 ABI v2 客户端取得管理会话，然后正常移除 PnP 设备；
+或由管理员在设备管理器中核实 `ROOT\CQKEYS_VHF\0000` 后单独处理该节点。
+设备清理仅针对该实例。详见生命周期契约中的隔离验收要求。

@@ -14,28 +14,49 @@ class SimpleInputTester:
             sys.exit(1)
 
         # 设置默认路径
-        if not dll_path or not sys_path:
-            base_dir = os.path.dirname(os.path.dirname(__file__))
-            self.dll_path = dll_path or os.path.join(base_dir, 'cqkeysdll', 'x64', 'Debug', 'cqkeysdll.dll')
-            self.sys_path = sys_path or os.path.join(base_dir, 'cqkeys', 'x64', 'Debug', 'cqkeys', 'cqkeys.sys')
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+        self.dll_path = dll_path or os.path.join(base_dir, 'cqkeysdll', 'x64', 'Debug', 'cqkeysdll.dll')
+        self.sys_path = sys_path or os.path.join(base_dir, 'cqkeys', 'x64', 'Debug', 'cqkeys', 'cqkeys.inf')
 
         # 加载驱动
-        self.driver = CDLL(self.dll_path)
-        
-        # 先尝试卸载已存在的驱动
-        self.driver.UnloadNTDriver(b'cqkeys')
+        self.driver = CDLL(self.dll_path, use_last_error=True)
+        self.driver.GetLifecycleVersion.argtypes = []
+        self.driver.GetLifecycleVersion.restype = ctypes.c_uint32
+        if self.driver.GetLifecycleVersion() != 2:
+            raise RuntimeError("需要 KMDF/VHF ABI v2 DLL")
+        self.driver.LoadNTDriver.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        self.driver.LoadNTDriver.restype = ctypes.c_int
+        self.driver.UnloadNTDriver.argtypes = [ctypes.c_char_p]
+        self.driver.UnloadNTDriver.restype = ctypes.c_int
+        self.driver.SetHandle.argtypes = []
+        self.driver.SetHandle.restype = ctypes.c_int
+        for name in ("KeyDown", "KeyUp"):
+            function = getattr(self.driver, name)
+            function.argtypes = [ctypes.c_ushort]
+            function.restype = None
+            function.errcheck = self._check_input_error
         
         # 加载驱动
-        if not self.driver.LoadNTDriver(b'cqkeys', self.sys_path.encode()):
-            raise RuntimeError("驱动加载失败")
+        if not self.driver.LoadNTDriver(b'cqkeys', self.sys_path.encode('mbcs')):
+            raise ctypes.WinError(ctypes.get_last_error())
         
         # 设置句柄
-        self.driver.SetHandle()
+        if not self.driver.SetHandle():
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    @staticmethod
+    def _check_input_error(result, function, arguments):
+        error = ctypes.get_last_error()
+        if error:
+            raise ctypes.WinError(error)
+        return result
 
     def cleanup(self):
         """清理驱动"""
         if self.driver:
-            self.driver.UnloadNTDriver(b'cqkeys')
+            if not self.driver.UnloadNTDriver(b'cqkeys'):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.driver = None
 
     def press_key(self, key):
         """按下并释放按键"""
@@ -126,11 +147,6 @@ def main():
         print("驱动已加载，3秒后开始输入...")
         time.sleep(3)
         
-        # # 测试空格
-        # print("测试空格输入")
-        # tester.press_key(' ')
-        # time.sleep(1)
-        
         # 测试字符串
         test_string = "Hello, World!"
         print(f"测试字符串输入: {test_string}")
@@ -143,4 +159,4 @@ def main():
         tester.cleanup()
 
 if __name__ == '__main__':
-    main() 
+    main()

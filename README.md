@@ -1,15 +1,29 @@
 # cqkeydriver
 
-驱动服务名和设备名为 `cqkeys`，动态库为 `cqkeysdll.dll`；
-C# 管理器项目为 `CqKeys`，Python 测试工具位于 `cqkeyspy_test/`。
+基于 **KMDF + Virtual HID Framework (VHF)** 的纯软件虚拟输入设备，通过 Windows 标准
+HID 输入栈提供键盘、鼠标和媒体键输入，无需实体键盘、鼠标。
 
-## 本地构建
+```text
+Python / C# / C++
+       ↓
+cqkeysdll.dll
+       ↓ 受 ACL 保护的设备接口 + 版本化 IOCTL
+KMDF HID Source Driver (cqkeys.sys)
+       ↓ VhfReadReportSubmit
+Windows 标准 HID 输入栈
+       ↓
+应用程序
+```
 
-已验证的构建环境：Visual Studio 2026、MSVC v143（14.44）、Windows SDK / WDK 28000.2526。
-在 Visual Studio Installer 中安装“使用 C++ 的桌面开发”、MSVC v143 和“Windows Driver Kit”组件，
-并安装配套的 Windows SDK 与 WDK。
+提供键盘、五键相对鼠标、绝对指针和媒体键四个 HID 顶层集合。接口仅允许 SYSTEM 和
+提升权限的管理员访问；一个系统同时只允许一个协作式 DLL 管理会话，内核设备也独占打开。
+本仓库安装包目标为 **Windows 10 1809+ / Windows 11 x64**。VHF 本身从 Windows 10 开始提供；
+1809 是本包采用 Driver Store 安装方式的支持下限，不代表所有这些系统均已实测。
 
-在仓库根目录使用 PowerShell 构建 x64 Debug 版本：
+## 构建
+
+环境：Visual Studio 2026、MSVC v143、Windows SDK / WDK 28000。
+使用配套 SDK/WDK 和 **64 位 MSBuild**：
 
 ```powershell
 $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find 'MSBuild\**\Bin\amd64\MSBuild.exe' | Select-Object -First 1
@@ -17,57 +31,58 @@ $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere
 & $msbuild .\cqkeys\cqkeys.vcxproj /t:Build /p:Configuration=Debug /p:Platform=x64
 ```
 
-WDK 28000 的 INF 验证需要使用上面的 **64 位 MSBuild**。
-输出文件分别位于 `cqkeysdll/x64/Debug/cqkeysdll.dll` 和 `cqkeys/x64/Debug/cqkeys.sys`；
-驱动安装包位于 `cqkeys/x64/Debug/cqkeys/`。构建成功不代表驱动已安装或加载。
+DLL 输出：`cqkeysdll/x64/Debug/cqkeysdll.dll`。
+完整驱动包：`cqkeys/x64/Debug/cqkeys/`，包含同次构建的 INF、SYS、CAT。
+**构建/生成目录文件不代表签名受信任、安装成功或输入可用。**
+没有签名证书时，可用 `/p:SignMode=Off` 做未签名编译与 INF/目录生成检查；
+这种产物不作为可安装发布包，不改变系统签名策略。生产部署须使用符合目标系统要求的签名。
 
-`cqkeyspy_test/cqkeysdll/` 中附带与当前源码名称一致的 x64 Debug DLL、
-测试签名驱动及其目录文件。更新驱动时，应将同一次构建生成的 `.sys` 和 `.cat` 一起替换。
-测试证书不会自动受到系统信任，驱动加载仍需在配置好测试证书信任的测试环境中验证。
+## 使用
 
-## 按需加载与运行时卸载
+1. 在获授权的隔离测试机准备正确签名且受信任的完整驱动包。不要在日常主机上调试内核驱动。
+2. 使用同次构建的 DLL 和驱动包；`GetLifecycleVersion()` 必须为 `2`。
+3. 管理员进程调用 `LoadNTDriver("cqkeys", infPath)`，再调用 `SetHandle()`。
+   DLL 经 SetupAPI 创建固定的根枚举 PnP 节点并安装所选 INF。
+4. 调用 `KeyDown/KeyUp`、鼠标接口，或 `ConsumerKeyDown/ConsumerKeyUp`。
+   输入接口返回 `void`，立即读取线程局部 `GetLastError()` 判断本次操作结果。
+5. 停止调用端任务后，调用 `StopNTDriver` 禁用节点，或 `UnloadNTDriver` 移除节点。
+   两者均保留 Driver Store 中的包，仅管理本项目的固定设备实例。
 
-本分支保留 non-PnP + SCM，重点支持可重试的运行时卸载：
+Python 测试工具位于 `cqkeyspy_test/`，C# 管理器为 `cqkeys_csharp/CqKeys.csproj`。
+在 Python GUI 的 SYS 选择框中选择完整包内的 `cqkeys.sys`；DLL 使用同目录同名 INF
+执行安装，缺失时报错。PnP 服务名为 `cqkeysVhf`。源码仓库不分发编译后的 DLL、SYS 或 CAT。
 
-- `StopNTDriver`：停止并卸载内存中的驱动，保留服务注册。
-- `UnloadNTDriver`：停止后删除服务注册，并确认删除完成。
-- DLL 串行化输入与句柄关闭，释放本会话记录的按键；Python GUI 先取消并等待输入任务退出。
-- Python 与 C# 复用 DLL 生命周期逻辑，错误不会再被当作卸载成功。
+### 行为边界
 
-**必须使用本分支重新构建的 DLL 和正确签名的驱动。附带的历史二进制未更新。**
-详见 [生命周期契约、测试与已知限制](docs/runtime-unload.md)。
+- 键盘支持 6 个普通键及 8 个独立修饰键；第 7 个普通键明确报错，左右 Ctrl/Shift/Alt 独立处理。
+- 支持常用 Windows VK、导航键、数字小键盘、F1–F24；未映射 VK 返回 `ERROR_NOT_SUPPORTED`。
+  OEM 键按常见 US 物理键位映射，由系统布局解释，不是 Unicode 文本输入 API。
+- 相对移动使用原始 HID 计数，大位移按 16 位范围拆分，屏幕位移由 Windows 鼠标设置决定。
+- 绝对移动只映射**主显示器**；越界坐标明确报错。
+- 滚轮参数使用 Windows `120` 单位，每次必须为 120 的整数倍且最多 127 格。
+- 媒体键使用独立 Consumer Control Report；同一时刻一个 consumer usage，不覆盖已按下的媒体键。
+- 休眠恢复时清空输入并改变代际，旧会话输入失败，需停止后重新加载/连接，避免重放旧按键。
 
-## Python示例
+详细协议、失败重试和隔离验收清单见 [生命周期与验证](docs/runtime-unload.md)。
 
-1. 开启 **测试模式** & **禁用强制驱动签名** 模式 & **重启**  
-（适用于编译出来的sys驱动没有经过签名的情况）
-```shell
-# 使用 `管理员身份` 打开 `CMD` 输入以下命令
-bcdedit /set nointegritychecks on
-bcdedit /set testsigning on
-shutdown  -r -t 0
+## 本地测试
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m compileall -q cqkeyspy_test
+& $msbuild .\tests\native_lifecycle_test.vcxproj /t:Build /p:Configuration=Debug /p:Platform=x64
+.\tests\bin\native_lifecycle_test.exe
+& $msbuild .\tests\native_pnp_test.vcxproj /t:Build /p:Configuration=Debug /p:Platform=x64
+.\tests\bin\native_pnp_test.exe
 ```
 
-2. 重启后**管理员身份**运行Python脚本  
-  - 使用`pip`或`conda`安装win32gui库  
-    `conda install win32gui`  
+原生测试编译实际 DLL 输入/生命周期、SetupAPI 安装逻辑及共享协议，使用假的 Win32 API
+边界测试失败、重试和并发顺序；不安装驱动、不产生实际输入，不能代替内核运行验收。
 
-**分为两种模式运行：**  
-  - 正常模式：`python gui.py`  
-  - DeBug模式：`python gui.py --debug`  
+## 参考与许可
 
-3. 高频按键需要注意  
-  - Python的 `time.sleep()` 精度问题  
-    - windows下 `time.sleep(0.001)` 的最小精度约为15ms，需要使用 `time.perf_counter()` 作为高精度计时器，可以精确到纳秒  
+- [Microsoft: Write a HID source driver by using VHF](https://learn.microsoft.com/windows-hardware/drivers/hid/virtual-hid-framework--vhf-)
+- [Microsoft: KMDF](https://learn.microsoft.com/windows-hardware/drivers/wdf/)
+- [Microsoft: Driver package installation](https://learn.microsoft.com/windows-hardware/drivers/install/driver-installation)
 
-## 声明
-_本项目遵循 AGPLv3 开源协议基于以下原始项目修改:_
-   - [kmclassdll.dll](https://github.com/BestBurning/kmclassdll/releases) - DLL动态库
-   - [kmclass.sys](https://github.com/BestBurning/kmclass/releases) - 内核驱动
-
-## 参考资料
-
-- 如何编译可参考 [编译dll并在python中使用ctypes调用](https://di1shuai.com/%E7%BC%96%E8%AF%91dll%E5%B9%B6%E5%9C%A8python%E4%B8%AD%E4%BD%BF%E7%94%A8ctypes%E8%B0%83%E7%94%A8.html)
-- 错误代码 [Error Codes](https://docs.microsoft.com/zh-cn/windows/win32/debug/system-error-codes)
-- [KMDF Hello World](https://docs.microsoft.com/zh-cn/windows-hardware/drivers/gettingstarted/writing-a-very-small-kmdf--driver)
-- [WDK 10](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) 
+本项目遵循 AGPLv3 开源协议。

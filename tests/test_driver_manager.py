@@ -19,7 +19,7 @@ class DriverManagerTests(unittest.TestCase):
         self.manager.dll_path = "test.dll"
         self.manager.sys_path = "C:\\test\\cqkeys.sys"
         self.native = Mock()
-        self.native.GetLifecycleVersion.return_value = 1
+        self.native.GetLifecycleVersion.return_value = 2
         self.native.LoadNTDriver.return_value = 1
         self.native.SetHandle.return_value = 1
         self.native.StopInputProcessing.return_value = 1
@@ -29,7 +29,7 @@ class DriverManagerTests(unittest.TestCase):
         self.loader.start()
         self.addCleanup(self.loader.stop)
 
-    def test_initialize_does_not_uninstall_an_existing_service(self):
+    def test_initialize_does_not_remove_an_existing_device(self):
         self.assertTrue(self.manager.initialize())
         self.native.UnloadNTDriver.assert_not_called()
 
@@ -55,13 +55,13 @@ class DriverManagerTests(unittest.TestCase):
         self.manager.cleanup()
         self.assertEqual(self.native.UnloadNTDriver.call_count, 1)
 
-    def test_old_dll_is_rejected_before_touching_the_service(self):
-        self.native.GetLifecycleVersion.return_value = 0
+    def test_incompatible_dll_is_rejected_before_installation(self):
+        self.native.GetLifecycleVersion.return_value = 1
         self.assertFalse(self.manager.initialize())
         self.native.LoadNTDriver.assert_not_called()
         self.assertIsNone(self.manager.driver)
 
-    def test_stop_retains_registration(self):
+    def test_stop_disables_without_removing_the_device(self):
         self.manager.driver = self.native
         self.manager.cleanup(uninstall=False)
         self.native.StopNTDriver.assert_called_once_with(b'cqkeys')
@@ -76,15 +76,15 @@ class DriverManagerTests(unittest.TestCase):
             self.manager.stop_input()
         self.assertIs(self.manager.driver, self.native)
 
-    def test_path_conflict_does_not_allow_cleanup_to_uninstall_the_other_binary(self):
+    def test_busy_session_retains_manager_for_native_ownership_aware_cleanup(self):
         self.native.LoadNTDriver.return_value = 0
-        ctypes.set_last_error(1073)
+        ctypes.set_last_error(170)
         self.assertFalse(self.manager.initialize())
         self.manager.cleanup()
-        self.native.UnloadNTDriver.assert_not_called()
+        self.native.UnloadNTDriver.assert_called_once_with(b'cqkeys')
         self.assertIsNone(self.manager.driver)
 
-    def test_load_failure_does_not_delete_a_service_it_did_not_start(self):
+    def test_install_failure_does_not_automatically_remove_the_device(self):
         self.native.LoadNTDriver.return_value = 0
         ctypes.set_last_error(5)
         self.assertFalse(self.manager.initialize())

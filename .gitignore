@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.d
 .vs/
+.venv/
+.codegraph/
+.omx/
 x64/
 *.vcxproj.user
 .vscode/
@@ -97,11 +100,8 @@ bld/
 !AppConfig.json  # 排除应用配置文件
 !package.json    # 排除包配置文件
 
-# Keep the sample configuration and bundled driver files under version control.
+# Sample configuration
 !/cqkeyspy_test/driver_config.json
-!/cqkeyspy_test/cqkeysdll/cqkeys.sys
-!/cqkeyspy_test/cqkeysdll/cqkeys.cat
-!/cqkeyspy_test/cqkeysdll/cqkeysdll.dll
 
 # Build and publish files
 publish/

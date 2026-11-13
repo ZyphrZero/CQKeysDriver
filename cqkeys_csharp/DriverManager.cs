@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 namespace CqKeys
 {
     // All clients share the native lifecycle implementation: one device handle,
-    // input drain, SCM state polling, and stop-before-delete ordering.
+    // input drain, and PnP disable/remove ordering.
     public sealed class DriverManager : IDisposable
     {
         private readonly SemaphoreSlim operations = new SemaphoreSlim(1, 1);
@@ -64,15 +64,12 @@ namespace CqKeys
                 if (needsCleanup) throw new InvalidOperationException("请先卸载当前会话");
                 return await Task.Run(() =>
                 {
-                    if (Native.GetLifecycleVersion() != 1)
-                        throw new InvalidOperationException("请使用本分支构建的 DLL");
+                    if (Native.GetLifecycleVersion() != 2)
+                        throw new InvalidOperationException("需要 ABI v2 DLL");
                     needsCleanup = true;
                     if (!Native.LoadNTDriver(driverName, Path.GetFullPath(driverPath)))
                     {
                         int error = Marshal.GetLastWin32Error();
-                        // A different binary owns this service name; closing this
-                        // window must not uninstall it after the rejected load.
-                        if (error == 1073) needsCleanup = false; // ERROR_SERVICE_EXISTS
                         throw new Win32Exception(error, "驱动启动失败");
                     }
                     if (!Native.SetHandle())
@@ -104,7 +101,7 @@ namespace CqKeys
         public void Dispose()
         {
             // UI awaits uninstall before disposing. Do not hide an unfinished
-            // lifecycle operation or perform SCM work from a finalizer.
+            // lifecycle operation or perform PnP work from a finalizer.
             if (disposed) return;
             if (!operations.Wait(0)) throw new InvalidOperationException("驱动操作尚未完成");
             try

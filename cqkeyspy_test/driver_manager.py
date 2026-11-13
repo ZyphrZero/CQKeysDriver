@@ -107,7 +107,7 @@ class DriverManager:
         return True
 
     def initialize(self):
-        """加载并连接驱动；失败时保留可重试的管理对象，不删除已有服务。"""
+        """安装并连接 VHF 设备；失败时保留对象供 PnP 清理重试。"""
         with self._lock:
             if self.driver is not None:
                 raise RuntimeError("请先停止或卸载当前驱动会话")
@@ -117,8 +117,8 @@ class DriverManager:
                 native = CDLL(self.dll_path, use_last_error=True)
                 native.GetLifecycleVersion.argtypes = []
                 native.GetLifecycleVersion.restype = ctypes.c_uint32
-                if native.GetLifecycleVersion() != 1:
-                    raise RuntimeError("DLL 生命周期接口版本不匹配，请使用本分支构建的 DLL")
+                if native.GetLifecycleVersion() != 2:
+                    raise RuntimeError("DLL 生命周期接口版本不匹配，需要 ABI v2 DLL")
                 for name in ("LoadNTDriver", "StopNTDriver", "UnloadNTDriver"):
                     function = getattr(native, name)
                     function.argtypes = [c_char_p, c_char_p] if name == "LoadNTDriver" else [c_char_p]
@@ -129,7 +129,7 @@ class DriverManager:
                     function.restype = c_int
                 native.GetDriverStatus.restype = c_int
                 native.GetLastCheckTime.restype = c_ulonglong
-                for name in ("KeyDown", "KeyUp", "MouseWheelUp", "MouseWheelDown"):
+                for name in ("KeyDown", "KeyUp", "ConsumerKeyDown", "ConsumerKeyUp", "MouseWheelUp", "MouseWheelDown"):
                     function = getattr(native, name)
                     function.argtypes = [ctypes.c_ushort]
                     function.restype = None
@@ -147,15 +147,13 @@ class DriverManager:
                 self.driver = native
                 if not self.driver.LoadNTDriver(b'cqkeys', self.sys_path.encode('mbcs')):
                     error = ctypes.get_last_error()
-                    if error == 1073:  # ERROR_SERVICE_EXISTS: another binary owns this name.
-                        self.driver = None
                     raise ctypes.WinError(error)
                 if not self.driver.SetHandle():
                     raise ctypes.WinError(ctypes.get_last_error())
                 logging.info("驱动初始化完成")
                 return True
             except Exception:
-                # DLL 负责清理连接失败的句柄；不能在这里卸载另一个客户端的服务。
+                # DLL 会话租约决定是否拥有 PnP 清理权，未取得租约的 cleanup 不操作设备。
                 logging.exception("驱动初始化失败；可使用卸载按钮重试清理")
                 return False
 
@@ -166,7 +164,7 @@ class DriverManager:
                 raise ctypes.WinError(ctypes.get_last_error())
 
     def cleanup(self, uninstall=True):
-        """停止驱动；uninstall=False 保留服务注册以便再次加载。"""
+        """移除 PnP 节点；uninstall=False 仅禁用节点，保留驱动包。"""
         with self._lock:
             if self.driver is None:
                 return
@@ -174,8 +172,8 @@ class DriverManager:
             if not operation(b'cqkeys'):
                 raise ctypes.WinError(ctypes.get_last_error())
             self.driver = None
-            logging.info("驱动已卸载" if uninstall else "驱动已停止，服务注册已保留")
+            logging.info("驱动管理会话已清理，驱动包保留" if uninstall else "驱动管理会话已停止")
 
     def get_driver(self):
         """获取驱动实例"""
-        return self.driver 
+        return self.driver

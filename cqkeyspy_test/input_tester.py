@@ -89,7 +89,6 @@ class InputTester:
         
         try:
             self._call("KeyDown", vk_code)
-            # self._wait(self.min_key_interval)  # 添加最小延时
             return True
         except WorkCancelled:
             raise
@@ -113,7 +112,6 @@ class InputTester:
         
         try:
             self._call("KeyUp", vk_code)
-            # self._wait(self.min_key_interval)  # 添加最小延时
             return True
         except WorkCancelled:
             raise
@@ -334,4 +332,4 @@ class InputTester:
         except Exception as e:
             logging.error
             (f"滚轮滚动失败: {str(e)}")
-            return False 
+            return False

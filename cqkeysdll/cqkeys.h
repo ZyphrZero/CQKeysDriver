@@ -1,177 +1,46 @@
-#ifndef _KEYMOUSE_H
-#define _KEYMOUSE_H
-
-
-#ifndef METHOD_BUFFERED
-#define METHOD_BUFFERED                 0
-#endif
+#pragma once
+#include <windows.h>
 
 #ifdef CQKEYSDLL_EXPORTS
 #define CQKEYSDLL_API __declspec(dllexport)
 #else
 #define CQKEYSDLL_API __declspec(dllimport)
 #endif
-// Runtime lifecycle ABI v1. FALSE reports a Win32 error via GetLastError.
-extern "C" CQKEYSDLL_API DWORD __cdecl GetLifecycleVersion();
-extern "C" CQKEYSDLL_API BOOL __cdecl StopInputProcessing();
-extern "C" CQKEYSDLL_API BOOL __cdecl StopNTDriver(char* name);
 
+enum DEVICE_STATUS {
+    DEVICE_STATUS_UNKNOWN = 0,
+    DEVICE_STATUS_READY = 1,
+    DEVICE_STATUS_ERROR = 2
+};
 
-#ifndef CTL_CODE
-#define CTL_CODE( DeviceType, Function, Method, Access ) (                 \
-    ((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method) \
-)
-#endif
-
-#ifndef FILE_ANY_ACCESS
-#define FILE_ANY_ACCESS                 0
-#endif
-
-#ifndef KEYBOARD_DEVICE
-#define KEYBOARD_DEVICE      0
-#endif
-
-#ifndef MOUSE_DEVICE
-#define MOUSE_DEVICE         1
-#endif
-//
-// Define the various device type values.  Note that values used by Microsoft
-// Corporation are in the range 0-0x7FFF(32767), and 0x8000(32768)-0xFFFF(65535)
-// are reserved for use by customers.
-//
-#define FILE_DEVICE_KEYMOUSE	0x8000
-
-//
-// Macro definition for defining IOCTL and FSCTL function control codes. Note
-// that function codes 0-0x7FF(2047) are reserved for Microsoft Corporation,
-// and 0x800(2048)-0xFFF(4095) are reserved for customers.
-//
-#define KEYMOUSE_IOCTL_BASE 0x800
-
-//
-// The device driver IOCTLs
-
-//
-#define CTL_CODE_KEYMOUSE(i)	(ULONG)(CTL_CODE(FILE_DEVICE_KEYMOUSE, KEYMOUSE_IOCTL_BASE + i, METHOD_BUFFERED, FILE_ANY_ACCESS))
-#define IOCTL_KEYBOARD       	CTL_CODE_KEYMOUSE(0)
-#define IOCTL_MOUSE	            CTL_CODE_KEYMOUSE(1)
-
-//
-// Name that Win32 front end will use to open the KeyMouse device
-//
-
-
-#define KEYMOUSE_DEVICE_NAME		    L"\\Device\\cqkeys"
-#define KEYMOUSE_DOS_DEVICE_NAME	    L"\\DosDevices\\cqkeys"
-
-#ifdef  UNICODE
-#define KEYMOUSE_WIN32_DEVICE_NAME	    L"\\\\.\\cqkeys"
-#define KEYMOUSE_DRIVER_NAME            L"cqkeys"
-#else
-#define KEYMOUSE_WIN32_DEVICE_NAME	    "\\\\.\\cqkeys"
-#define KEYMOUSE_DRIVER_NAME            "cqkeys"
-#endif
-
-
-typedef struct _KEYBOARD_INPUT_DATA {
-
-    USHORT UnitId;
-
-    USHORT MakeCode;
-
-    USHORT Flags;
-
-    USHORT Reserved;
-
-    ULONG ExtraInformation;
-
-} KEYBOARD_INPUT_DATA, * PKEYBOARD_INPUT_DATA;
-
-//
-// Define the keyboard input data Flags.
-//
-
-#define KEY_MAKE  0
-#define KEY_BREAK 1
-#define KEY_E0    2
-#define KEY_E1    4
-#define KEY_TERMSRV_SET_LED 8
-#define KEY_TERMSRV_SHADOW  0x10
-#define KEY_TERMSRV_VKPACKET 0x20
-
-#define KEY_DOWN                KEY_MAKE
-#define KEY_UP                  KEY_BREAK
-#define KEY_BLANK                -1
-
-
-typedef struct _MOUSE_INPUT_DATA {
-
-    USHORT UnitId;
-
-    USHORT Flags;
-
-    union {
-        ULONG Buttons;
-        struct {
-            USHORT  ButtonFlags;
-            USHORT  ButtonData;
-        };
-    };
-
-    ULONG RawButtons;
-
-    LONG LastX;
-
-    LONG LastY;
-
-    ULONG ExtraInformation;
-
-} MOUSE_INPUT_DATA, * PMOUSE_INPUT_DATA;
-
-//
-// Define the mouse button state indicators.
-//
-
-// 鼠标按键
-#define MOUSE_LEFT_BUTTON        0x0001  // 左键
-#define MOUSE_RIGHT_BUTTON       0x0002  // 右键
-#define MOUSE_LEFT_BUTTON_DOWN   0x0001  // 左键按下
-#define MOUSE_LEFT_BUTTON_UP     0x0002  // 左键释放
-#define MOUSE_RIGHT_BUTTON_DOWN  0x0004  // 右键按下
-#define MOUSE_RIGHT_BUTTON_UP    0x0008  // 右键释放
-#define MOUSE_MIDDLE_BUTTON_DOWN 0x0010  // 中键按下
-#define MOUSE_MIDDLE_BUTTON_UP   0x0020  // 中键释放
-
-#define MOUSE_BUTTON_1_DOWN     MOUSE_LEFT_BUTTON_DOWN
-#define MOUSE_BUTTON_1_UP       MOUSE_LEFT_BUTTON_UP
-#define MOUSE_BUTTON_2_DOWN     MOUSE_RIGHT_BUTTON_DOWN
-#define MOUSE_BUTTON_2_UP       MOUSE_RIGHT_BUTTON_UP
-#define MOUSE_BUTTON_3_DOWN     MOUSE_MIDDLE_BUTTON_DOWN
-#define MOUSE_BUTTON_3_UP       MOUSE_MIDDLE_BUTTON_UP
-
-// 鼠标侧键
-#define MOUSE_BUTTON_4_DOWN     0x0040  // 前侧键(X1)按下
-#define MOUSE_BUTTON_4_UP       0x0080  // 前侧键(X1)释放
-#define MOUSE_BUTTON_5_DOWN     0x0100  // 后侧键(X2)按下
-#define MOUSE_BUTTON_5_UP       0x0200  // 后侧键(X2)释放
-
-#define Mouse_XButton_1_Down     MOUSE_BUTTON_4_DOWN
-#define Mouse_XButton_1_Up       MOUSE_BUTTON_4_UP
-#define Mouse_XButton_2_Down     MOUSE_BUTTON_5_DOWN
-#define Mouse_XButton_2_Up       MOUSE_BUTTON_5_UP
-
-// 鼠标滚轮
-#define MOUSE_WHEEL             0x0400
-#define MOUSE_WHEEL_UP         0x0780  // 滚轮向上
-#define MOUSE_WHEEL_DOWN       0x0800  // 滚轮向下
-
-// 滚轮数据
-#define WHEEL_DELTA            120     // 标准滚轮单位
-
-// 定义鼠标指示标志
-#define MOUSE_MOVE_RELATIVE         0  // 相对移动
-#define MOUSE_MOVE_ABSOLUTE         1  // 绝对移动
-#define MOUSE_VIRTUAL_DESKTOP    0x02  // 坐标映射到虚拟桌面
-#define MOUSE_ATTRIBUTES_CHANGED 0x04  // 请求鼠标属性
-
-#endif
+extern "C" {
+CQKEYSDLL_API DWORD __cdecl GetLifecycleVersion();
+CQKEYSDLL_API BOOL __cdecl LoadNTDriver(const char* name, const char* path);
+CQKEYSDLL_API BOOL __cdecl StopNTDriver(const char* name);
+CQKEYSDLL_API BOOL __cdecl UnloadNTDriver(const char* name);
+CQKEYSDLL_API BOOL __cdecl SetHandle();
+CQKEYSDLL_API BOOL __cdecl StopInputProcessing();
+CQKEYSDLL_API void __cdecl CheckDeviceStatus();
+CQKEYSDLL_API DEVICE_STATUS __cdecl GetDriverStatus();
+CQKEYSDLL_API ULONGLONG __cdecl GetLastCheckTime();
+CQKEYSDLL_API HANDLE __cdecl GetDriverHandle();
+CQKEYSDLL_API int __cdecl GetDetailedErrorCode();
+CQKEYSDLL_API void __cdecl KeyDown(USHORT virtualKey);
+CQKEYSDLL_API void __cdecl KeyUp(USHORT virtualKey);
+CQKEYSDLL_API void __cdecl ConsumerKeyDown(USHORT usage);
+CQKEYSDLL_API void __cdecl ConsumerKeyUp(USHORT usage);
+CQKEYSDLL_API void __cdecl MouseMoveRELATIVE(LONG deltaX, LONG deltaY);
+CQKEYSDLL_API void __cdecl MouseMoveABSOLUTE(LONG screenX, LONG screenY);
+CQKEYSDLL_API void __cdecl MouseLeftButtonDown();
+CQKEYSDLL_API void __cdecl MouseLeftButtonUp();
+CQKEYSDLL_API void __cdecl MouseRightButtonDown();
+CQKEYSDLL_API void __cdecl MouseRightButtonUp();
+CQKEYSDLL_API void __cdecl MouseMiddleButtonDown();
+CQKEYSDLL_API void __cdecl MouseMiddleButtonUp();
+CQKEYSDLL_API void __cdecl MouseXButton1Down();
+CQKEYSDLL_API void __cdecl MouseXButton1Up();
+CQKEYSDLL_API void __cdecl MouseXButton2Down();
+CQKEYSDLL_API void __cdecl MouseXButton2Up();
+CQKEYSDLL_API void __cdecl MouseWheelUp(USHORT wheelDelta);
+CQKEYSDLL_API void __cdecl MouseWheelDown(USHORT wheelDelta);
+}

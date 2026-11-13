@@ -25,7 +25,7 @@ namespace CqKeys
             _driverPath = Path.Combine(
                 projectDir,
                 "dll",
-                "cqkeys.sys"
+                "cqkeys.inf"
             );
             
             string dllPath = Path.Combine(
@@ -94,7 +94,7 @@ namespace CqKeys
                 if (result)
                 {
                     _isDriverInstalled = false;
-                    OnStatusChanged("驱动卸载成功！");
+                    OnStatusChanged("驱动管理会话已清理，Driver Store 驱动包保留。");
                 }
             }
             catch (Exception ex)
@@ -132,4 +132,4 @@ namespace CqKeys
             Dispose(false);
         }
     }
-} 
+}

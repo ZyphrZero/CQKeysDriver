@@ -21,12 +21,21 @@
     <ClInclude Include="cqkeys.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="pnp_device.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shared\cqkeys_protocol.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="cqkeysdll.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="pnp_device.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
