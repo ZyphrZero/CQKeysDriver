@@ -1,6 +1,7 @@
 """Native boundaries only are faked; no DLL, device, windows, or input."""
 
 import ctypes
+import math
 from pathlib import Path
 import sys
 import threading
@@ -10,7 +11,8 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cqkeyspy_test"))
 from input_tasks import (InputTasks, CqInputAction, CqInputTaskResult, InputTaskError,
                          InputTaskCancelled, NativeCallError, COMPLETED, CANCELLED,
-                         FAILED, RUNNING, KEY_DOWN, KEY_UP, WAIT, action, milliseconds)
+                         FAILED, RUNNING, KEY_DOWN, KEY_UP, MOVE_RELATIVE, MOVE_ABSOLUTE,
+                         WAIT, action, milliseconds)
 
 
 def native_tasks():
@@ -482,6 +484,52 @@ class InputTasksTests(unittest.TestCase):
                        (5, 2147483648, 0, 0), (9, 0, 0, -1)):
             with self.assertRaises(ValueError):
                 action(*fields)
+
+    def test_integer_milliseconds_round_trip_across_entire_gui_range(self):
+        mismatches = [(delay, milliseconds(delay / 1000)) for delay in range(1, 60001)
+                      if milliseconds(delay / 1000) != delay]
+        self.assertEqual(mismatches, [])
+
+    def test_fractional_milliseconds_still_round_up(self):
+        for delay in range(60000):
+            self.assertEqual(milliseconds((delay + .25) / 1000), delay + 1)
+            self.assertEqual(milliseconds(math.nextafter(delay / 1000, math.inf)), delay + 1)
+        self.assertEqual(milliseconds(0), 0)
+        self.assertEqual(milliseconds(60), 60000)
+
+    def test_millisecond_boundaries_reject_real_overflow_before_rounding(self):
+        for seconds in (math.nextafter(60, math.inf), math.nextafter(0, -math.inf),
+                        float('nan'), float('inf'), float('-inf')):
+            with self.subTest(seconds=seconds), self.assertRaises(ValueError):
+                milliseconds(seconds)
+
+    def test_relative_move_accepts_both_axes_at_report_limit(self):
+        for horizontal in (-8388352, 0, 8388352):
+            for vertical in (-8388352, 0, 8388352):
+                with self.subTest(horizontal=horizontal, vertical=vertical):
+                    step = action(MOVE_RELATIVE, horizontal, vertical)
+                    self.assertEqual((step.value1, step.value2), (horizontal, vertical))
+
+    def test_relative_move_rejects_either_axis_over_limit_including_long_min(self):
+        for value in (-2147483648, -8388353, 8388353, 2147483647):
+            for horizontal, vertical in ((value, 0), (0, value)):
+                with self.subTest(horizontal=horizontal, vertical=vertical):
+                    with self.assertRaises(ValueError):
+                        action(MOVE_RELATIVE, horizontal, vertical)
+
+    def test_relative_move_limit_validates_entire_task_before_submit(self):
+        for value in (-2147483648, -8388353, 8388353, 2147483647):
+            for horizontal, vertical in ((value, 0), (0, value)):
+                with self.subTest(horizontal=horizontal, vertical=vertical):
+                    steps = self.actions + [CqInputAction(MOVE_RELATIVE, horizontal, vertical, 0)]
+                    with self.assertRaises(ValueError):
+                        self.tasks.submit(steps)
+                    self.assertIsNone(self.tasks.active)
+        self.native.SubmitInputTask.assert_not_called()
+
+    def test_relative_report_limit_does_not_restrict_absolute_coordinates(self):
+        step = action(MOVE_ABSOLUTE, -2147483648, 2147483647)
+        self.assertEqual((step.value1, step.value2), (-2147483648, 2147483647))
 
     def test_stop_local_event_cancels_then_collects_native_completion(self):
         from input_tester import InputTester

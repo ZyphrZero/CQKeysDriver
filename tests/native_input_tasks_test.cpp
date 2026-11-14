@@ -9,7 +9,71 @@ CqInputTaskResult resultFor(uint64_t taskId) {
     return result;
 }
 
+void testCancellationBypassesLifecycleLock() {
+    fake::reset(); check(SetHandle(), "cancel contention session");
+    uint64_t taskId = 0;
+    CqInputAction delay{CQ_INPUT_WAIT, 0, 0, 60000};
+    check(SubmitInputTask(&delay, 1, 1, 0, &taskId), "contended cancellable task");
+    std::unique_lock<std::mutex> lifecycle(g_lifecycleMutex);
+    std::atomic<bool> cancellationReturned{false};
+    std::thread cancelling([&] {
+        check(CancelInputTask(taskId), "cancel without lifecycle lock");
+        cancellationReturned = true;
+        fake::ioCondition.notify_all();
+    });
+    {
+        std::unique_lock<std::mutex> lock(fake::ioMutex);
+        check(fake::ioCondition.wait_for(lock, std::chrono::seconds(2), [&] { return cancellationReturned.load(); }),
+            "cancellation notification does not wait for lifecycle operations");
+    }
+    lifecycle.unlock(); cancelling.join();
+    check(WaitInputTask(taskId, 3000) && resultFor(taskId).state == CQ_INPUT_TASK_CANCELLED,
+        "contended cancellation reaches terminal result");
+    check(CleanupInputRuntime(), "contended cancellation cleanup");
+}
+
+void testShortTaskReportBudget() {
+    fake::reset(); check(SetHandle(), "short task budget session");
+    uint64_t taskId = 0;
+    CqInputAction tap[]{{CQ_INPUT_KEY_DOWN, 'A', 0, 0}, {CQ_INPUT_KEY_UP, 'A', 0, 0}};
+    int queriesBefore = fake::queries;
+    check(SubmitInputTask(tap, 2, 100, 0, &taskId) && WaitInputTask(taskId, 3000), "repeat task completes");
+    check(fake::reports == 200 && fake::queries == queriesBefore + 1,
+        "clean completed task has no redundant neutral reports and retains final diagnosis");
+    check(ReleaseInputTask(taskId), "release clean task");
+    CqInputAction held{CQ_INPUT_KEY_DOWN, 'B', 0, 0};
+    check(SubmitInputTask(&held, 1, 1, 0, &taskId) && WaitInputTask(taskId, 3000), "held input task completes");
+    check(fake::reports == 202 && !fake::state.keyboard.keys[0],
+        "normal held key gets its required release without unrelated reports");
+    check(CleanupInputRuntime(), "short task budget cleanup");
+}
+
+void testStopWakesTaskBeforeLifecycleLock() {
+    fake::reset(); check(SetHandle(), "early stop signal session");
+    uint64_t taskId = 0;
+    CqInputAction held{CQ_INPUT_KEY_DOWN, 'A', 0, 60000};
+    check(SubmitInputTask(&held, 1, 1, 0, &taskId), "held task before contended stop");
+    {
+        std::unique_lock<std::mutex> lock(fake::ioMutex);
+        check(fake::ioCondition.wait_for(lock, std::chrono::seconds(2), [] { return !fake::submitted.empty(); }),
+            "held report precedes contended stop");
+    }
+    std::unique_lock<std::mutex> lifecycle(g_lifecycleMutex);
+    std::thread stopping([] { check(StopInputProcessing(), "contended stop finishes"); });
+    check(WaitInputTask(taskId, 3000), "STOP wakes long task wait before lifecycle lock becomes available");
+    {
+        std::lock_guard<std::mutex> lock(fake::ioMutex);
+        check(fake::stops == 1 && !fake::state.keyboard.keys[0],
+            "task's stop path releases held input during lifecycle contention");
+    }
+    lifecycle.unlock(); stopping.join();
+    check(CleanupInputRuntime(), "early stop signal cleanup");
+}
+
 int main() {
+    testCancellationBypassesLifecycleLock();
+    testShortTaskReportBudget();
+    testStopWakesTaskBeforeLifecycleLock();
     uint64_t taskId = 0, otherId = 0;
     CqInputAction tap[]{{CQ_INPUT_KEY_DOWN, 'A', 0, 0}, {CQ_INPUT_KEY_UP, 'A', 0, 0}};
     CqInputAction delay{CQ_INPUT_WAIT, 0, 0, 60000};
@@ -21,6 +85,10 @@ int main() {
     check(!SubmitInputTask(tap, 2, 1, 60001, &taskId), "bounded delay");
     CqInputAction invalid{CQ_INPUT_BUTTONS, 32, 0, 0};
     check(!SubmitInputTask(&invalid, 1, 1, 0, &taskId), "invalid action rejected before worker");
+    CqInputAction oversized[]{{CQ_INPUT_KEY_DOWN, 'A', 0, 0},
+        {CQ_INPUT_MOVE_RELATIVE, LONG_MIN, LONG_MAX, 0}};
+    check(!SubmitInputTask(oversized, 2, 1, 0, &taskId) && GetLastError() == ERROR_INVALID_PARAMETER && !fake::reports,
+        "oversized movement rejects the entire task before its first key down");
     KeyDown('B');
     check(!SubmitInputTask(tap, 2, 1, 0, &taskId) && GetLastError() == ERROR_BUSY, "legacy held key prevents task");
     KeyUp('B');
@@ -174,7 +242,7 @@ int main() {
         "cleanup failure visible in result");
     check(!CleanupInputRuntime() && fake::lease && !fake::closes, "failed cleanup retains handle and lease");
     fake::stopError = 0; check(CleanupInputRuntime() && !fake::lease, "retry cleanup drains and releases resources");
-    fake::reset(); check(SetHandle(), "final diagnosis failure session"); fake::failQueryAfterReports = 5;
+    fake::reset(); check(SetHandle(), "final diagnosis failure session"); fake::failQueryAfterReports = 2;
     check(SubmitInputTask(tap, 2, 1, 0, &taskId) && WaitInputTask(taskId, 3000), "final query failure reaches terminal state");
     result = resultFor(taskId);
     check(result.state == CQ_INPUT_TASK_FAILED && result.error == ERROR_GEN_FAILURE &&

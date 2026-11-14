@@ -31,6 +31,15 @@ python .\example\python\demo.py --inf "C:\DriverPackage\cqkeys.inf" --consumer 0
 
 退出时默认释放输入并**禁用 PnP 节点**；再次使用可传入 `--inf` 启用。
 指定 `--uninstall` 则移除 PnP 节点，两种方式均保留 Driver Store 中的包。
+测试时可显式指定 `--remove-package`，退出时移除设备并删除本次相关 Driver Store 包（隐含 `--uninstall`）：
+
+```powershell
+python .\example\python\demo.py --inf "C:\DriverPackage\cqkeys.inf" --remove-package
+```
+
+此选项需要新版 DLL 的 `UnloadNTDriverAndPackage` 导出；缺少接口时报错，不自动退回普通卸载。
+只删除本次暂存及设备绑定的精确 OEM 包，不强制删除其他设备使用的包，也不扫描全部历史版本。
+包删除失败保留客户端清理状态供 `close()` 重试；命令行进程退出后不会跨进程保存待删除列表。
 失败会打印操作名和 Win32 错误码；清理失败也会单独报告并返回非零退出码。
 
 点按/媒体键的按住时长和输入动作由 DLL 有限任务执行；Python 负责参数、准备倒计时和结果展示。

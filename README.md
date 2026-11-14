@@ -28,8 +28,9 @@ DLL 负责 VK 映射、组合输入、连按与可取消的有限动作任务；
 
 ## 构建
 
-前提：Visual Studio、已安装的 MSVC v143，以及配套 Windows SDK / WDK 28000 和 WDK 平台工具集。
-只有 Visual Studio 或 v145 不能替代这些前提；构建缺失时不会自动安装工具或改项目工具集。
+DLL 和用户态原生测试使用 Visual Studio、MSVC v145 及 Windows SDK，测试与生产 DLL 使用同一工具集。
+SYS 另需 MSVC v143、配套 Windows SDK / WDK 28000 和 WDK 平台工具集；v145 不能替代驱动构建前提。
+构建缺失时不会自动安装工具、关闭检查或临时覆盖项目工具集。
 使用配套 SDK/WDK 和 **64 位 MSBuild**：
 
 ```powershell
@@ -64,14 +65,20 @@ Release DLL 位于 `cqkeysdll/x64/Release/cqkeysdll.dll`，是 Python 命令行�
 5. 停止时先禁止调用端新任务并请求 `StopInputProcessing()` 屏障，等待真实完成；
    需要设备管理时调用 `StopNTDriver` 禁用节点，或 `UnloadNTDriver` 移除节点。
    两者均保留 Driver Store 中的包，仅管理本项目的固定设备实例。
+6. 测试时可在 C# / Python GUI 勾选“卸载时删除 Driver Store 包”，点击卸载并确认。
+   新接口 `UnloadNTDriverAndPackage("cqkeys")` 在移除设备后删除本次暂存及设备绑定的 OEM 驱动包；
+   不强制删除其他设备使用的包，不扫描全部历史版本。失败保留清理状态供重试，要求重启时明确报错。
+   该选项默认关闭；仅关闭窗口不会发起新的包删除请求，但会继续先前已确认且未完成的清理。
 
 C++ 调用端需要同时提供 `cqkeysdll/cqkeys.h` 和 `shared/cqkeys_protocol.h`，并保持二者的相对目录；
 只复制前者无法解析其共享协议头。
 
 Python 测试工具位于 `cqkeyspy_test/`，C# 管理器为 `cqkeys_csharp/CqKeys.csproj`。
 Python GUI 需要带 Tkinter 的 64 位 Python 3.9+ 及 `pywin32`；单元测试使用隔离的边界，不要求运行真实 GUI。
-在 Python GUI 的 SYS 选择框中选择完整包内的 `cqkeys.sys`；DLL 使用同目录同名 INF
-执行安装，缺失时报错。PnP 服务名为 `cqkeysVhf`。源码仓库不分发编译后的 DLL、SYS 或 CAT。
+Python GUI 选择 DLL 和完整包内的 `cqkeys.inf`，与 C# 一样在加载前检查 DLL、INF 及同目录 SYS/CAT，
+缺失时列出路径并阻止调用原生安装接口。旧 `sys_path` 配置会提示迁移到同目录 INF，保存后改用 `inf_path`。
+删除 Driver Store 包需要提供新导出接口的 DLL；旧 DLL 不会静默降级为保留包的卸载。
+PnP 服务名为 `cqkeysVhf`。源码仓库不分发编译后的 DLL、SYS 或 CAT。
 
 Python 命令行演示位于 [`example/python/demo.py`](example/python/demo.py)，默认检查连接状态并在退出时禁用设备，
 可显式选择键盘、鼠标或媒体键测试，运行方法见 [演示说明](example/python/README.md)。
@@ -79,13 +86,15 @@ Python 命令行演示位于 [`example/python/demo.py`](example/python/demo.py)�
 ### C# 部署
 
 C# 的 Debug/Release 配置名为 `AnyCPU`，实际输出固定为 x64。构建 C# 本身不会生成 DLL 或驱动包。
-将构建的 `cqkeysdll.dll` 和正确签名、匹配的 INF/SYS/CAT 放入 `cqkeys_csharp/dll/` 后再构建：
+先构建同配置的 x64 原生 DLL，将正确签名、匹配的 INF/SYS/CAT 放入 `cqkeys_csharp/dll/` 后再构建：
 
 ```powershell
 & $msbuild .\cqkeys_csharp/CqKeys.csproj /t:Build /p:Configuration=Release /p:Platform=AnyCPU
 ```
 
-项目把 `cqkeysdll.dll` 复制到 EXE 同级，其余驱动文件保留在输出目录的 `dll/` 子目录：
+项目默认从 `cqkeysdll/x64/$(Configuration)/cqkeysdll.dll` 复制 DLL 到 EXE 同级；
+可用 `/p:CqKeysNativeDll=完整路径` 显式指定其他来源。源文件缺失会阻止构建，不沿用输出目录的旧 DLL；
+每次构建均复制所选来源，其余驱动文件保留在输出目录的 `dll/` 子目录：
 
 ```text
 CqKeys.exe
@@ -103,7 +112,8 @@ DLL 不能只放在输出的 `dll/` 内。文件齐备或 C# 编译成功不代�
 - 键盘支持 6 个普通键及 8 个独立修饰键；第 7 个普通键明确报错，左右 Ctrl/Shift/Alt 独立处理。
 - 支持常用 Windows VK、导航键、数字小键盘、F1–F24；未映射 VK 返回 `ERROR_NOT_SUPPORTED`。
   OEM 键按常见 US 物理键位映射，由系统布局解释，不是 Unicode 文本输入 API。
-- 相对移动使用原始 HID 计数，大位移按 16 位范围拆分，屏幕位移由 Windows 鼠标设置决定。
+- 相对移动使用原始 HID 计数，大位移按 16 位范围拆分；每次最多 256 份报告，每轴范围 ±8388352。
+  超限在提交前拒绝，任务内超限会拒绝整个任务；屏幕位移由 Windows 鼠标设置决定。
 - 绝对移动只映射**主显示器**；越界坐标明确报错。
 - 滚轮参数使用 Windows `120` 单位，每次必须为 120 的整数倍且最多 127 格。
 - 媒体键使用独立 Consumer Control Report；同一时刻一个 consumer usage，不覆盖已按下的媒体键。
@@ -114,6 +124,17 @@ DLL 不能只放在输出的 `dll/` 内。文件齐备或 C# 编译成功不代�
 - 默认 VHF 缓冲在休眠恢复时的实际行为必须在隔离系统验收，不能用代际检查代替下游验证。
 
 详细协议、失败重试和隔离验收清单见 [生命周期与验证](docs/runtime-unload.md)。
+
+### 高频输入与资源边界
+
+- 高频连按应提交一个有限重复任务，而不是每次点按新建任务；每个任务仍使用独立工作线程。
+- DLL 复用一个串行报告事件，仅在真实 I/O 完成后重置复用；运行时清理释放事件，关闭失败保留重试状态。
+- 正常任务只释放仍按住的输入；取消或结果不确定时保留完整中性化。已完整释放的 N 次点按为 2N 份报告及一次最终状态查询。
+- 查询 I/O 使用短期借用计数，不占用生命周期锁等待；STOP 可先执行，但关闭设备仍等待在途查询真实结束。
+- `GetDetailedErrorCode()` 读取本线程最近一次 DLL 成功/失败，不再被其他线程覆盖；异步结果仍须读取任务结果。
+- 毫秒参数仍是动作完成后的相对等待，不承诺硬实时固定频率。GUI 时长按理论周期折算次数，显示任务完成侧统计，而非目标程序接收数。
+- Python GUI 合并高频进度并限制日志缓冲/显示容量，溢出有显式计数；C# 日志限制为 65536 字符并关闭撤销历史，裁剪有提示。
+- VHF 默认缓冲策略和 SYS 协议未改变。下游丢报告、休眠恢复及长时内核池稳定性仍须隔离验收，不能由用户态优化或单元测试证明。
 
 ## 本地测试
 

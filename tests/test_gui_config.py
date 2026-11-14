@@ -17,7 +17,7 @@ class GuiConfigTests(unittest.TestCase):
         self.gui = CQKeysGUI.__new__(CQKeysGUI)
         self.gui.config_file = str(self.config_path)
         self.gui.auto_move_config = {"hotkey": "F8", "speed": 10, "range": 100}
-        for name, value in (("dll_path_var", "new.dll"), ("sys_path_var", "new.inf"),
+        for name, value in (("dll_path_var", "new.dll"), ("inf_path_var", "new.inf"),
                             ("test_key_var", "a"), ("press_time_var", "2"),
                             ("interval_time_var", "3"), ("duration_var", "4"),
                             ("hotkey_var", "F9"), ("speed_var", "20"), ("range_var", "200")):
@@ -40,7 +40,7 @@ class GuiConfigTests(unittest.TestCase):
     def test_load_uses_utf8_for_non_ascii_paths_and_settings(self):
         saved = {
             "dll_path": "C:\\输入\\工具.dll",
-            "sys_path": "C:\\输入\\设备.inf",
+            "inf_path": "C:\\输入\\cqkeys.inf",
             "auto_move": {"hotkey": "自定义", "speed": 20, "range": 200},
         }
         self.config_path.write_text(json.dumps(saved, ensure_ascii=False), encoding="utf-8")
@@ -48,7 +48,7 @@ class GuiConfigTests(unittest.TestCase):
             self.gui.load_path_config()
             self.gui.load_auto_move_config()
         self.gui.dll_path_var.set.assert_called_once_with(saved["dll_path"])
-        self.gui.sys_path_var.set.assert_called_once_with(saved["sys_path"])
+        self.gui.inf_path_var.set.assert_called_once_with(saved["inf_path"])
         self.assertEqual(self.gui.auto_move_config["hotkey"], "自定义")
         self.assertEqual(opened.call_count, 2)
         for call in opened.call_args_list:
@@ -70,8 +70,28 @@ class GuiConfigTests(unittest.TestCase):
             "test_key": "a", "press_time": "2", "interval_time": "3", "duration": "4",
             "custom": {"keep": True},
         })
-        self.assertEqual((updated["dll_path"], updated["sys_path"]), ("new.dll", "new.inf"))
+        self.assertEqual((updated["dll_path"], updated["inf_path"]), ("new.dll", "new.inf"))
+        self.assertNotIn("sys_path", updated)
         self.errors.assert_not_called()
+
+    def test_legacy_sys_config_is_migrated_visibly_without_rewriting_on_load(self):
+        self.save_config({"dll_path": "saved.dll", "sys_path": "C:\\包\\cqkeys.sys"})
+        original = self.config_path.read_bytes()
+        with self.assertLogs(level="WARNING"):
+            self.gui.load_path_config()
+        self.gui.inf_path_var.set.assert_called_once_with("C:\\包\\cqkeys.inf")
+        self.assertEqual(self.config_path.read_bytes(), original)
+
+    def test_explicit_inf_setting_takes_priority_over_legacy_path(self):
+        self.save_config({"inf_path": "new/cqkeys.inf", "sys_path": "old/cqkeys.sys"})
+        self.gui.load_path_config()
+        self.gui.inf_path_var.set.assert_called_once_with("new/cqkeys.inf")
+
+    def test_inf_picker_does_not_offer_bare_sys_files(self):
+        with patch.object(gui_module.filedialog, "askopenfilename", return_value="package/cqkeys.inf") as dialog:
+            self.gui.browse_file("inf")
+        self.assertEqual(dialog.call_args.kwargs["filetypes"], [("CQKeys driver INF", "cqkeys.inf")])
+        self.gui.inf_path_var.set.assert_called_once_with("package/cqkeys.inf")
 
     def test_auto_move_save_only_updates_its_keys_from_current_file(self):
         saved = {

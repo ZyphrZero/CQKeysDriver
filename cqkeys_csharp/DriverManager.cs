@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -14,9 +15,22 @@ namespace CqKeys
     {
         private readonly SemaphoreSlim operations = new SemaphoreSlim(1, 1);
         private bool needsCleanup;
+        private bool removePackagePending;
         private bool disposed;
         public bool IsInputReady { get; private set; }
         public bool NeedsCleanup => needsCleanup;
+
+        public sealed class NativeLibraryInfo
+        {
+            public string Path { get; }
+            public bool SupportsPackageRemoval { get; }
+
+            internal NativeLibraryInfo(string path, bool supportsPackageRemoval)
+            {
+                Path = path;
+                SupportsPackageRemoval = supportsPackageRemoval;
+            }
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct DriverStartResult
@@ -31,6 +45,10 @@ namespace CqKeys
 
         private static class Native
         {
+            [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
+            [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+            internal static extern IntPtr GetProcAddress(IntPtr module, string name);
+
             [DllImport("cqkeysdll.dll", CallingConvention = CallingConvention.Cdecl)]
             [DefaultDllImportSearchPaths(DllImportSearchPath.AssemblyDirectory | DllImportSearchPath.System32)]
             internal static extern uint GetLifecycleVersion();
@@ -59,6 +77,11 @@ namespace CqKeys
             [DefaultDllImportSearchPaths(DllImportSearchPath.AssemblyDirectory | DllImportSearchPath.System32)]
             [return: MarshalAs(UnmanagedType.Bool)]
             internal static extern bool UnloadNTDriver(string name);
+
+            [DllImport("cqkeysdll.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true, CharSet = CharSet.Ansi)]
+            [DefaultDllImportSearchPaths(DllImportSearchPath.AssemblyDirectory | DllImportSearchPath.System32)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            internal static extern bool UnloadNTDriverAndPackage(string name);
         }
 
         public DriverManager()
@@ -68,6 +91,47 @@ namespace CqKeys
                 if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
                     throw new UnauthorizedAccessException("需要管理员权限才能操作驱动程序。");
             }
+        }
+
+        public static NativeLibraryInfo InspectNativeLibrary()
+        {
+            uint version = Native.GetLifecycleVersion();
+            string expectedPath = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cqkeysdll.dll"));
+            using (var process = Process.GetCurrentProcess())
+            {
+                ProcessModule loaded = null;
+                foreach (ProcessModule module in process.Modules)
+                {
+                    if (!string.Equals(module.ModuleName, "cqkeysdll.dll", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (loaded != null)
+                        throw new InvalidOperationException($"检测到多个同名 DLL，不能确定原生接口来源，请完成清理后重启：{loaded.FileName}；{module.FileName}");
+                    loaded = module;
+                }
+                if (loaded == null) throw new InvalidOperationException("无法查询实际加载的 cqkeysdll.dll，未执行驱动操作。");
+                string actualPath = Path.GetFullPath(loaded.FileName);
+                if (!string.Equals(actualPath, expectedPath, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"DLL 加载路径不匹配。预期: {expectedPath}；实际: {actualPath}。请完成清理后重启。");
+                if (version != 2)
+                    throw new InvalidOperationException($"需要 ABI v2 DLL，实际版本为 {version}。实际加载 DLL: {actualPath}");
+                IntPtr removal = Native.GetProcAddress(loaded.BaseAddress, "UnloadNTDriverAndPackage");
+                if (removal == IntPtr.Zero)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error != 127)
+                        throw CreateDriverException(error, $"检查 Driver Store 删除接口失败，实际加载 DLL: {actualPath}");
+                }
+                return new NativeLibraryInfo(actualPath, removal != IntPtr.Zero);
+            }
+        }
+
+        public void RequirePackageRemoval()
+        {
+            if (disposed) throw new ObjectDisposedException(nameof(DriverManager));
+            var library = InspectNativeLibrary();
+            if (!library.SupportsPackageRemoval)
+                throw new InvalidOperationException("当前 DLL 缺少 UnloadNTDriverAndPackage，未开始卸载或删除包。\n"
+                    + $"实际加载 DLL: {library.Path}\n"
+                    + "可取消勾选后普通卸载（保留驱动包），完成清理后退出并更新 DLL，再重启程序。不会自动降级卸载。");
         }
 
         public async Task<bool> InstallAndStartDriverAsync(string driverName, string driverPath)
@@ -81,8 +145,7 @@ namespace CqKeys
                 if (needsCleanup) throw new InvalidOperationException("请先卸载当前会话");
                 return await Task.Run(() =>
                 {
-                    if (Native.GetLifecycleVersion() != 2)
-                        throw new InvalidOperationException("需要 ABI v2 DLL");
+                    InspectNativeLibrary();
                     needsCleanup = true;
                     if (!Native.LoadNTDriver(driverName, Path.GetFullPath(driverPath)))
                     {
@@ -98,20 +161,34 @@ namespace CqKeys
             finally { operations.Release(); }
         }
 
-        public async Task<bool> StopAndUninstallDriverAsync(string driverName)
+        public async Task<bool> StopAndUninstallDriverAsync(string driverName, bool removePackage = false)
         {
             if (driverName != "cqkeys") throw new ArgumentException("驱动名称必须为 cqkeys");
             await operations.WaitAsync();
             try
             {
                 if (disposed) throw new ObjectDisposedException(nameof(DriverManager));
+                if (removePackage || removePackagePending) RequirePackageRemoval();
                 IsInputReady = false;
+                removePackagePending |= removePackage;
                 await Task.Run(() =>
                 {
-                    if (!Native.UnloadNTDriver(driverName))
-                        throw CreateDriverException(Marshal.GetLastWin32Error(), "UnloadNTDriver 驱动卸载失败");
+                    try
+                    {
+                        bool success = removePackagePending ? Native.UnloadNTDriverAndPackage(driverName)
+                                                            : Native.UnloadNTDriver(driverName);
+                        if (!success)
+                            throw CreateDriverException(Marshal.GetLastWin32Error(), removePackagePending
+                                ? "UnloadNTDriverAndPackage 设备或 Driver Store 包清理失败"
+                                : "UnloadNTDriver 驱动卸载失败");
+                    }
+                    catch (EntryPointNotFoundException error)
+                    {
+                        throw new InvalidOperationException("DLL 缺少所选卸载接口，请更新 cqkeysdll.dll；未退回普通卸载。", error);
+                    }
                 });
                 needsCleanup = false;
+                removePackagePending = false;
                 return true;
             }
             finally { operations.Release(); }

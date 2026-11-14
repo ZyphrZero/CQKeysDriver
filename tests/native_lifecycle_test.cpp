@@ -23,8 +23,12 @@ namespace fake {
     uint64_t epoch = 10, openedEpoch = 0;
     int stops = 0, changes = 0, installs = 0, reports = 0, failReportAt = 0, queries = 0;
     std::atomic<int> closes{0}, cancels{0};
+    std::atomic<int> createdEvents{0}, resetEvents{0};
+    HANDLE lastReportEvent = nullptr;
+    bool failEventClose = false, failEventReset = false;
     bool failClose = false, leaseBusy = false, lease = false, removed = false;
     bool failLeaseRelease = false;
+    bool packageDeletionRequested = false;
     bool failThreadClose = false;
     bool badReceipt = false, badBegin = false, invalidateOnBegin = false, failQuery = false;
     bool blockReport = false, deferCompletion = false, completionReady = false;
@@ -50,10 +54,16 @@ namespace fake {
     HANDLE WINAPI createEvent(LPSECURITY_ATTRIBUTES attributes, BOOL manualReset, BOOL initialState, LPCWSTR name) {
         HANDLE handle = ::CreateEventW(attributes, manualReset, initialState, name);
         if (handle) {
+            ++createdEvents;
             std::lock_guard<std::mutex> lock(handleMutex);
             liveEvents.push_back(handle);
         }
         return handle;
+    }
+    BOOL WINAPI resetEvent(HANDLE handle) {
+        ++resetEvents;
+        if (failEventReset) { SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
+        return ::ResetEvent(handle);
     }
     HANDLE WINAPI createThread(LPSECURITY_ATTRIBUTES attributes, SIZE_T stackSize, LPTHREAD_START_ROUTINE entry,
                                LPVOID argument, DWORD flags, LPDWORD threadId) {
@@ -67,6 +77,7 @@ namespace fake {
 
     BOOL error(DWORD code) { SetLastError(code); return FALSE; }
     void reset() {
+        packageDeletionRequested = false;
         installError = changeError = openError = stopError = 0;
         startProblemCode = startDiagnosticError = 0; startProblemStatus = 0;
         infoMajor = CQKEYS_PROTOCOL_MAJOR;
@@ -75,6 +86,9 @@ namespace fake {
         epoch = 10; openedEpoch = 0;
         stops = changes = installs = reports = failReportAt = queries = 0;
         closes = cancels = 0;
+        createdEvents = resetEvents = 0;
+        lastReportEvent = nullptr;
+        failEventClose = failEventReset = false;
         failClose = leaseBusy = lease = removed = false;
         failLeaseRelease = false;
         failThreadClose = false;
@@ -96,6 +110,7 @@ namespace fake {
     }
     BOOL WINAPI closeDevice(HANDLE handle) {
         if (handle != device) {
+            if (handle == lastReportEvent && failEventClose) return error(ERROR_INVALID_HANDLE);
             std::lock_guard<std::mutex> lock(handleMutex);
             auto thread = std::find(liveThreads.begin(), liveThreads.end(), handle);
             if (thread != liveThreads.end() && failThreadClose) return error(ERROR_INVALID_HANDLE);
@@ -256,6 +271,7 @@ namespace fake {
         const auto& request = *static_cast<CqReportRequest*>(input);
         if (!CqValidReport(request)) return error(ERROR_INVALID_PARAMETER);
         ++reports;
+        lastReportEvent = operation->hEvent;
         state.lastAcceptedSequence = request.sequence;
         if (reports == failReportAt) {
             state.inputStatus = -1;
@@ -292,8 +308,10 @@ BOOL CqInstallDevice(const char*, CqDriverStartResult* diagnostics) {
     }
     return fake::installError ? fake::error(fake::installError) : TRUE;
 }
-BOOL CqChangeDevice(bool remove) {
+BOOL CqChangeDevice(bool remove, bool removePackage) {
     ++fake::changes;
+    fake::packageDeletionRequested = removePackage;
+    if (removePackage && !remove) return fake::error(ERROR_INVALID_PARAMETER);
     if (fake::changeError) return fake::error(fake::changeError);
     fake::removed = remove;
     return TRUE;
@@ -311,6 +329,7 @@ BOOL CqReleaseSession() {
 
 #define CloseHandle fake::closeDevice
 #define CreateEventW fake::createEvent
+#define ResetEvent fake::resetEvent
 #define CreateThread fake::createThread
 #define DeviceIoControl fake::io
 #define GetOverlappedResult fake::overlapped
@@ -319,6 +338,7 @@ BOOL CqReleaseSession() {
 #include "../cqkeysdll/cqkeysdll.cpp"
 #undef CloseHandle
 #undef CreateEventW
+#undef ResetEvent
 #undef CreateThread
 #undef DeviceIoControl
 #undef GetOverlappedResult
@@ -435,6 +455,18 @@ void testDescriptor() {
     check(reportBits[4] == (sizeof(CqConsumerReport) - 1) * 8, "consumer descriptor matches wire layout");
 }
 
+void testThreadLocalError() {
+    check(!QueryDriverInfo(nullptr) && GetDetailedErrorCode() == ERROR_INVALID_PARAMETER,
+        "thread failure is available through detailed error");
+    std::thread other([] {
+        CqInputResult result{sizeof(CqInputResult), CQ_INPUT_RESULT_ABI};
+        check(GetLastInputResult(&result), "other thread succeeds");
+    });
+    other.join();
+    check(GetDetailedErrorCode() == ERROR_INVALID_PARAMETER,
+        "other thread success cannot overwrite this thread's detailed error");
+}
+
 void testDriverStartDiagnostics() {
     fake::reset();
     fake::installError = static_cast<DWORD>(CERT_E_REVOKED);
@@ -475,21 +507,120 @@ void testDriverStartDiagnostics() {
     check(UnloadNTDriver("cqkeys"), "successful simulated startup cleanup");
 }
 
+void testReportEventReuse() {
+    fake::reset(); check(SetHandle(), "event reuse session");
+    int eventsBefore = fake::createdEvents;
+    for (int index = 0; index < 100; ++index) { KeyDown('A'); KeyUp('A'); }
+    check(fake::reports == 200 && fake::createdEvents == eventsBefore + 1,
+        "reports reuse one event instead of allocating per report");
+    check(fake::resetEvents >= 199, "completed report event is reset before reuse");
+    HANDLE event = fake::lastReportEvent;
+    check(SetEvent(event), "signal cached event from previous completion");
+    fake::blockReport = true;
+    std::thread pendingInput([] { KeyDown('B'); });
+    check(waitPending(), "next report is pending with reused event");
+    check(fake::lastReportEvent == event && WaitForSingleObject(event, 0) == WAIT_TIMEOUT,
+        "pending report cannot observe stale completion signal");
+    {
+        std::lock_guard<std::mutex> lock(fake::ioMutex);
+        fake::blockReport = false;
+        fake::completePending(ERROR_SUCCESS);
+    }
+    pendingInput.join(); KeyUp('B');
+    fake::failEventClose = true;
+    check(!CleanupInputRuntime() && GetLastError() == ERROR_INVALID_HANDLE && fake::lease,
+        "cached event close failure retains runtime ownership for retry");
+    fake::failEventClose = false;
+    check(CleanupInputRuntime(), "cached event close is retryable");
+    {
+        std::lock_guard<std::mutex> handles(fake::handleMutex);
+        check(fake::liveEvents.empty(), "cached event is released at runtime cleanup");
+    }
+    fake::reset(); check(SetHandle(), "event reset failure session");
+    KeyDown('A');
+    fake::failEventReset = true;
+    KeyUp('A');
+    check(GetLastError() == ERROR_INVALID_HANDLE && fake::reports == 1,
+        "reset failure is reported without issuing another report");
+    fake::failEventReset = false;
+    check(CleanupInputRuntime(), "event reset failure can be cleaned up");
+}
+
+void testRelativeMoveBudget() {
+    fake::reset(); check(SetHandle(), "relative budget session");
+    const LONG limit = 32767L * CQ_INPUT_MAX_MOVE_REPORTS;
+    MouseMoveRELATIVE(limit + 1, 0);
+    check(GetLastError() == ERROR_INVALID_PARAMETER && !fake::reports,
+        "oversized relative move is rejected before any side effect");
+    MouseMoveRELATIVE(LONG_MIN, LONG_MAX);
+    check(GetLastError() == ERROR_INVALID_PARAMETER && !fake::reports,
+        "extreme coordinates are rejected without signed overflow");
+    MouseMoveRELATIVE(limit, -limit);
+    check(GetLastError() == ERROR_SUCCESS && fake::reports == CQ_INPUT_MAX_MOVE_REPORTS,
+        "relative budget boundary preserves every movement report");
+    CqInputResult result{sizeof(CqInputResult), CQ_INPUT_RESULT_ABI};
+    check(GetLastInputResult(&result) && result.confirmedX == limit && result.confirmedY == -limit,
+        "bounded relative motion retains exact totals");
+    check(CleanupInputRuntime(), "relative budget cleanup");
+}
+
+void testQueryDoesNotBlockStop() {
+    fake::reset(); check(SetHandle(), "query stop session");
+    KeyDown('A');
+    fake::holdQuery = true;
+    CqDeviceState snapshot{};
+    std::thread query([&] { check(QueryInputState(&snapshot), "held query completes"); });
+    {
+        std::unique_lock<std::mutex> lock(fake::ioMutex);
+        check(fake::ioCondition.wait_for(lock, std::chrono::seconds(2), [] { return fake::queryEntered; }),
+            "public query captured snapshot");
+    }
+    std::atomic<bool> closed{false};
+    std::thread cleanup([&] { check(CleanupInputRuntime(), "cleanup after held query"); closed = true; });
+    {
+        std::unique_lock<std::mutex> lock(fake::ioMutex);
+        check(fake::ioCondition.wait_for(lock, std::chrono::seconds(2), [] { return fake::stops != 0; }),
+            "STOP is issued before a concurrent query completes");
+        check(!closed && !fake::closes, "device remains open until query really completes");
+        fake::releaseQuery = true;
+    }
+    fake::ioCondition.notify_all(); query.join(); cleanup.join();
+    check(fake::closes == 1 && !fake::lease, "query lease drains before closing device");
+}
+
 #ifndef CQ_INPUT_TASK_TEST
 int main() {
     const char* name = "cqkeys";
     const char* path = "C:\\test\\cqkeys.inf";
     testDescriptor();
+    testThreadLocalError();
+    testReportEventReuse();
+    testRelativeMoveBudget();
+    testQueryDoesNotBlockStop();
     testStopAdmission([] { return StopInputProcessing(); });
     testStopAdmission([] { return StopNTDriver("cqkeys"); });
     testStopAdmission([] { return UnloadNTDriver("cqkeys"); });
+    testStopAdmission([] { return UnloadNTDriverAndPackage("cqkeys"); });
     testStopAdmission([] { return CleanupInputRuntime(); });
     testStopDuringBegin();
     testStateSnapshotOwnership();
     testLeaseReleaseFailure([] { return CleanupInputRuntime(); });
     testLeaseReleaseFailure([] { return StopNTDriver("cqkeys"); });
     testLeaseReleaseFailure([] { return UnloadNTDriver("cqkeys"); });
+    testLeaseReleaseFailure([] { return UnloadNTDriverAndPackage("cqkeys"); });
     testDriverStartDiagnostics();
+    fake::reset();
+    check(SetHandle(), "prepare package removal session");
+    fake::changeError = ERROR_ACCESS_DENIED;
+    check(!UnloadNTDriverAndPackage("cqkeys") && GetLastError() == ERROR_ACCESS_DENIED &&
+        fake::packageDeletionRequested && fake::lease && g_cleanupRequired,
+        "package deletion uses full stop ordering and preserves failed cleanup ownership");
+    fake::changeError = 0;
+    check(UnloadNTDriverAndPackage("cqkeys") && fake::removed && fake::packageDeletionRequested && !fake::lease,
+        "package removal retry reaches the explicit PnP deletion boundary");
+    int completedChanges = fake::changes;
+    check(UnloadNTDriverAndPackage("cqkeys") && fake::changes == completedChanges,
+        "completed package removal can be repeated without another PnP operation");
     fake::reset();
     check(GetLifecycleVersion() == 2, "lifecycle ABI is independent of wire 3.0");
     check(sizeof(CqDeviceInfo) == 56 && sizeof(CqDeviceState) == 88 && sizeof(CqSubmitResult) == 32, "wire sizes");
@@ -497,6 +628,8 @@ int main() {
     fake::leaseBusy = true;
     check(!LoadNTDriver(name, path) && GetLastError() == ERROR_BUSY, "busy lease");
     check(UnloadNTDriver(name) && !fake::changes, "unowned session cannot remove device");
+    check(!UnloadNTDriverAndPackage(name) && GetLastError() == ERROR_INVALID_STATE && !fake::changes,
+        "unowned session cannot claim package deletion or remove another session's package");
     fake::leaseBusy = false;
     fake::installError = ERROR_SUCCESS_REBOOT_REQUIRED;
     check(!LoadNTDriver(name, path) && GetLastError() == ERROR_SUCCESS_REBOOT_REQUIRED, "installation error preserved");

@@ -9,16 +9,20 @@ namespace System.Windows
     public class StartupEventArgs : EventArgs { }
     public class ExitEventArgs : EventArgs { }
     public class RoutedEventArgs : EventArgs { }
-    public enum MessageBoxButton { OK }
+    public enum MessageBoxButton { OK, YesNo }
     public enum MessageBoxImage { Warning, Error }
+    public enum MessageBoxResult { OK, Yes, No }
 
     public static class MessageBox
     {
         public static readonly List<string> Messages = new List<string>();
-        public static void Show(string message, string caption,
-            MessageBoxButton button = MessageBoxButton.OK, MessageBoxImage image = MessageBoxImage.Error)
+        public static MessageBoxResult NextResult = MessageBoxResult.No;
+        public static MessageBoxResult Show(string message, string caption,
+            MessageBoxButton button = MessageBoxButton.OK, MessageBoxImage image = MessageBoxImage.Error,
+            MessageBoxResult defaultResult = MessageBoxResult.OK)
         {
             Messages.Add(caption + ": " + message);
+            return button == MessageBoxButton.YesNo ? NextResult : MessageBoxResult.OK;
         }
     }
 
@@ -110,7 +114,9 @@ namespace System.Windows
     public sealed class TestControl
     {
         public bool IsEnabled { get; set; }
+        public bool? IsChecked { get; set; } = false;
         public string Text { get; set; } = "";
+        public bool IsUndoEnabled { get; set; } = true;
         public void AppendText(string text) { Text += text; }
         public void ScrollToEnd() { }
         public bool Focus() { return true; }
@@ -139,10 +145,15 @@ namespace CqKeys
         public static DriverManager LastCreated;
         public bool NeedsCleanup { get; set; }
         public bool IsInputReady { get; set; }
+        public bool SupportsPackageRemoval { get; set; } = true;
+        public string LoadedDllPath { get; set; } = "simulated/cqkeysdll.dll";
+        public Exception InspectionFailure { get; set; }
+        public int InspectionCalls { get; private set; }
         public int TestCalls { get; private set; }
         public Func<InputTestKind, CancellationToken, Task<string>> InputTestOperation { get; set; }
         public int InstallCalls { get; private set; }
         public int UninstallCalls { get; private set; }
+        public bool RemovePackageRequested { get; private set; }
         public int DisposeCalls { get; private set; }
         public Exception UninstallFailure { get; set; }
         public TaskCompletionSource<bool> UninstallCompletion { get; set; }
@@ -152,14 +163,35 @@ namespace CqKeys
             if (DenyConstruction) throw new UnauthorizedAccessException("Test administrator denial");
             LastCreated = this;
         }
+        public sealed class NativeLibraryInfo
+        {
+            public string Path { get; set; }
+            public bool SupportsPackageRemoval { get; set; }
+        }
+        public static NativeLibraryInfo InspectNativeLibrary()
+        {
+            var manager = LastCreated;
+            manager.InspectionCalls++;
+            if (manager.InspectionFailure != null) throw manager.InspectionFailure;
+            return new NativeLibraryInfo { Path = manager.LoadedDllPath, SupportsPackageRemoval = manager.SupportsPackageRemoval };
+        }
+        public void RequirePackageRemoval()
+        {
+            var library = InspectNativeLibrary();
+            if (!library.SupportsPackageRemoval)
+                throw new InvalidOperationException("删除接口不可用: " + library.Path);
+        }
         public Task<bool> InstallAndStartDriverAsync(string name, string path)
         {
             InstallCalls++;
             throw new InvalidOperationException("Unexpected install boundary call; no native implementation is linked here");
         }
-        public async Task<bool> StopAndUninstallDriverAsync(string name)
+        public async Task<bool> StopAndUninstallDriverAsync(string name, bool removePackage = false)
         {
             UninstallCalls++;
+            RemovePackageRequested = removePackage;
+            if (removePackage && !SupportsPackageRemoval)
+                throw new EntryPointNotFoundException("UnloadNTDriverAndPackage");
             if (UninstallFailure != null) throw UninstallFailure;
             if (UninstallCompletion != null) await UninstallCompletion.Task;
             NeedsCleanup = false;
@@ -187,6 +219,7 @@ namespace CqKeys
         public System.Windows.TestControl LogTextBox = new System.Windows.TestControl();
         public System.Windows.TestControl InstallButton = new System.Windows.TestControl();
         public System.Windows.TestControl UninstallButton = new System.Windows.TestControl();
+        public System.Windows.TestControl RemovePackageCheckBox = new System.Windows.TestControl();
         public System.Windows.TestControl KeyboardTestButton = new System.Windows.TestControl();
         public System.Windows.TestControl MouseTestButton = new System.Windows.TestControl();
         public System.Windows.TestControl CancelTestButton = new System.Windows.TestControl();

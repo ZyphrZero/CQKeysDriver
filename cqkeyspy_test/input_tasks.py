@@ -1,6 +1,7 @@
 """cdecl task ABI v1; Python builds content, the DLL owns input timing."""
 
 import ctypes
+from decimal import Decimal
 import math
 import threading
 
@@ -12,6 +13,8 @@ MOVE_RELATIVE, MOVE_ABSOLUTE, BUTTONS, WHEEL, WAIT = 5, 6, 7, 8, 9
 RUNNING, COMPLETED, CANCELLED, FAILED = 1, 2, 3, 4
 PARTIAL, UNCERTAIN, CANCELLED_FLAG = 1, 2, 4
 MAX_ACTIONS, MAX_REPEATS, MAX_DELAY_MS = 4096, 65535, 60000
+MAX_MOVE_REPORTS = 256
+MAX_RELATIVE_MOVE = 32767 * MAX_MOVE_REPORTS
 
 
 class CqInputAction(ctypes.Structure):
@@ -68,7 +71,7 @@ def checked_int(value, lower, upper, name):
 def milliseconds(seconds):
     if not math.isfinite(seconds) or not 0 <= seconds <= MAX_DELAY_MS / 1000:
         raise ValueError("动作等待时间必须为 0..60 秒的有限数值")
-    return math.ceil(seconds * 1000)
+    return math.ceil(Decimal(str(seconds)) * 1000)
 
 
 def action(kind, value1=0, value2=0, delay_ms=0):
@@ -80,6 +83,9 @@ def action(kind, value1=0, value2=0, delay_ms=0):
         checked_int(value1, 1, 0xffff, "VK")
     elif kind in (CONSUMER_DOWN, CONSUMER_UP):
         checked_int(value1, 1, 0x3ff, "consumer usage")
+    elif kind == MOVE_RELATIVE:
+        checked_int(value1, -MAX_RELATIVE_MOVE, MAX_RELATIVE_MOVE, "relative dx")
+        checked_int(value2, -MAX_RELATIVE_MOVE, MAX_RELATIVE_MOVE, "relative dy")
     elif kind == BUTTONS:
         checked_int(value1, 0, 31, "buttons")
     elif kind == WHEEL:
@@ -112,6 +118,58 @@ def call_bool(native, name, *arguments):
         raise NativeCallError(name, ctypes.get_last_error())
 
 
+class InputCancellation:
+    """Single-submission cancellation; native failures propagate and allow cancel retries."""
+
+    def __init__(self):
+        self._cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._used = False
+        self._task = None
+        self._cancel_sent = False
+
+    def is_set(self):
+        return self._cancelled.is_set()
+
+    def cancel(self):
+        self._cancelled.set()
+        with self._lock:
+            self._cancel_bound_task()
+
+    def _cancel_bound_task(self):
+        if self._task is not None and not self._cancel_sent:
+            self._task.cancel()
+            self._cancel_sent = True
+
+    def _claim(self):
+        with self._lock:
+            if self._used:
+                raise RuntimeError("取消令牌只能用于一个任务")
+            if self.is_set():
+                raise WorkCancelled("任务提交前已取消")
+            self._used = True
+
+    def _bind(self, task):
+        with self._lock:
+            self._task = task
+            task._cancellation = self
+            if self.is_set():
+                self._cancel_bound_task()
+
+    def _unbind(self, task):
+        with self._lock:
+            if self._task is task:
+                self._task = None
+                task._cancellation = None
+
+    def _release(self, task):
+        with self._lock:
+            call_bool(task.native, "ReleaseInputTask", task.id)
+            if self._task is task:
+                self._task = None
+                task._cancellation = None
+
+
 class InputTask:
     def __init__(self, native, task_id, expected_actions=None, expected_repeats=None):
         self.native, self.id = native, task_id
@@ -119,6 +177,12 @@ class InputTask:
         self.expected_repeats = expected_repeats
         self.result = None
         self.released = False
+        self._cancellation = None
+
+    def _unbind_cancellation(self):
+        cancellation = self._cancellation
+        if cancellation is not None:
+            cancellation._unbind(self)
 
     def cancel(self):
         call_bool(self.native, "CancelInputTask", self.id)
@@ -141,6 +205,8 @@ class InputTask:
                 result.resultFlags & ~(PARTIAL | UNCERTAIN | CANCELLED_FLAG) or result.reserved):
             raise RuntimeError("DLL 返回了不兼容的任务结果")
         self.result = result
+        if result.state != RUNNING:
+            self._unbind_cancellation()
         return result
 
 
@@ -153,7 +219,7 @@ class InputTasks:
         self._lock = threading.RLock()
         self._waiter = None
 
-    def submit(self, actions, repeats=1, repeat_delay_ms=0):
+    def submit(self, actions, repeats=1, repeat_delay_ms=0, cancellation=None):
         checked_int(repeats, 1, MAX_REPEATS, "repeats")
         checked_int(repeat_delay_ms, 0, MAX_DELAY_MS, "repeatDelayMs")
         checked_int(len(actions), 1, MAX_ACTIONS, "action count")
@@ -163,11 +229,15 @@ class InputTasks:
         with self._lock:
             if self.active is not None or self._waiter is not None:
                 raise NativeCallError("SubmitInputTask", 170)
+            if cancellation is not None:
+                cancellation._claim()
             call_bool(self.native, "SubmitInputTask", buffer, len(buffer), repeats,
                       repeat_delay_ms, ctypes.byref(task_id))
             if not task_id.value:
                 raise RuntimeError("DLL 成功返回但没有任务 ID")
             self.active = InputTask(self.native, task_id.value, len(buffer) * repeats, repeats)
+            if cancellation is not None:
+                cancellation._bind(self.active)
             return self.active
 
     def release(self, task):
@@ -176,7 +246,11 @@ class InputTasks:
                 raise RuntimeError("任务不属于当前调用对象")
             if self._waiter not in (None, threading.get_ident()):
                 raise RuntimeError("任务仍有等待线程，不能释放")
-            call_bool(self.native, "ReleaseInputTask", task.id)
+            cancellation = task._cancellation
+            if cancellation is None:
+                call_bool(self.native, "ReleaseInputTask", task.id)
+            else:
+                cancellation._release(task)
             task.released = True
             self.active = None
 
@@ -220,11 +294,12 @@ class InputTasks:
             raise InputTaskCancelled(result)
         return result
 
-    def run(self, actions, repeats=1, repeat_delay_ms=0, cancelled=None, progress=None):
+    def run(self, actions, repeats=1, repeat_delay_ms=0, cancelled=None, progress=None,
+            cancellation=None):
         if cancelled is not None and cancelled():
             raise WorkCancelled("任务提交前已取消")
         with self._lock:
-            task = self.submit(actions, repeats, repeat_delay_ms)
+            task = self.submit(actions, repeats, repeat_delay_ms, cancellation=cancellation)
             self._waiter = threading.get_ident()
         try:
             return self._wait_result(task, cancelled, progress)
@@ -265,7 +340,5 @@ class InputTasks:
             self.last_result = result
             if result.state == RUNNING:
                 raise InputTaskError(result)
-            call_bool(self.native, "ReleaseInputTask", task.id)
-            task.released = True
-            self.active = None
+            self.release(task)
             return result

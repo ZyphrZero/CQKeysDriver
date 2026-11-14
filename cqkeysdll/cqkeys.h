@@ -40,7 +40,8 @@ enum : uint32_t {
     CQ_INPUT_TASK_ABI = 1,
     CQ_INPUT_TASK_MAX_ACTIONS = 4096,
     CQ_INPUT_TASK_MAX_REPEATS = 65535,
-    CQ_INPUT_TASK_MAX_DELAY_MS = 60000
+    CQ_INPUT_TASK_MAX_DELAY_MS = 60000,
+    CQ_INPUT_MAX_MOVE_REPORTS = 256
 };
 
 enum : uint32_t {
@@ -128,6 +129,7 @@ CQKEYSDLL_API BOOL __cdecl LoadNTDriver(const char* name, const char* path);
 CQKEYSDLL_API BOOL __cdecl GetLastDriverStartResult(CqDriverStartResult* result);
 CQKEYSDLL_API BOOL __cdecl StopNTDriver(const char* name);
 CQKEYSDLL_API BOOL __cdecl UnloadNTDriver(const char* name);
+CQKEYSDLL_API BOOL __cdecl UnloadNTDriverAndPackage(const char* name);
 CQKEYSDLL_API BOOL __cdecl SetHandle();
 CQKEYSDLL_API BOOL __cdecl StopInputProcessing();
 CQKEYSDLL_API void __cdecl CheckDeviceStatus();

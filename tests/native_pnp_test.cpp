@@ -14,10 +14,13 @@
 
 namespace allocation_fault {
     bool armed = false;
+    std::size_t targetSize = 0;
 }
 
+void resetPackageState();
+
 __declspec(noinline) void* operator new(std::size_t size) {
-    if (allocation_fault::armed) {
+    if (allocation_fault::armed && size == allocation_fault::targetSize) {
         allocation_fault::armed = false;
         throw std::bad_alloc();
     }
@@ -47,6 +50,10 @@ namespace fake {
     ULONG problemSize = sizeof(LONG);
     int statusQueries = 0, propertyQueries = 0;
     std::wstring inspectedPath;
+    std::wstring boundInf, failingPackage;
+    DWORD bindingError = 0, deleteError = 0;
+    DEVPROPTYPE bindingType = DEVPROP_TYPE_STRING;
+    std::vector<std::wstring> deleteAttempts, deletedPackages;
     const GUID systemClass = {0x4d36e97d, 0xe325, 0x11ce, {0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}};
     BOOL error(DWORD value) { SetLastError(value); return FALSE; }
     void reset() {
@@ -59,6 +66,10 @@ namespace fake {
         statusError = propertyError = CR_SUCCESS;
         problemType = DEVPROP_TYPE_NTSTATUS; problemSize = sizeof(LONG);
         statusQueries = propertyQueries = 0;
+        boundInf = L"oem42.inf"; failingPackage.clear();
+        bindingError = deleteError = 0; bindingType = DEVPROP_TYPE_STRING;
+        deleteAttempts.clear(); deletedPackages.clear();
+        resetPackageState();
     }
     DWORD WINAPI attributes(LPCWSTR path) { inspectedPath = path; return FILE_ATTRIBUTE_NORMAL; }
     BOOL WINAPI infClass(LPCWSTR, LPGUID result, PWSTR name, DWORD, PDWORD) {
@@ -78,7 +89,7 @@ namespace fake {
     }
     BOOL WINAPI createInfo(HDEVINFO, PCWSTR id, const GUID*, PCWSTR, HWND, DWORD flags, PSP_DEVINFO_DATA info) {
         if (wcscmp(id, CQKEYS_INSTANCE_ID) || flags) return error(ERROR_INVALID_PARAMETER);
-        ++creations; exists = true; info->DevInst = 42; return TRUE;
+        ++creations; exists = true; boundInf.clear(); info->DevInst = 42; return TRUE;
     }
     BOOL WINAPI setProperty(HDEVINFO, PSP_DEVINFO_DATA, DWORD property, const BYTE* data, DWORD size) {
         const wchar_t ids[] = CQKEYS_HARDWARE_ID L"\0";
@@ -130,7 +141,26 @@ namespace fake {
         if (installError) return error(installError);
         if (device->DevInst != 42 || selected->Reserved != 42 || flags != DIIDFLAG_NOFINISHINSTALLUI)
             return error(ERROR_INVALID_PARAMETER);
-        *reboot = restart; enabled = true; return TRUE;
+        *reboot = restart; enabled = true; boundInf = L"oem42.inf"; return TRUE;
+    }
+    BOOL WINAPI driverProperty(HDEVINFO, PSP_DEVINFO_DATA, const DEVPROPKEY* key, DEVPROPTYPE* type,
+                               PBYTE buffer, DWORD capacity, PDWORD bytes, DWORD flags) {
+        if (!IsEqualDevPropKey(*key, DEVPKEY_Device_DriverInfPath) || flags)
+            return error(ERROR_INVALID_PARAMETER);
+        if (bindingError) return error(bindingError);
+        if (boundInf.empty()) return error(ERROR_NOT_FOUND);
+        *type = bindingType;
+        *bytes = static_cast<DWORD>((boundInf.size() + 1) * sizeof(wchar_t));
+        if (*bytes > capacity) return error(ERROR_INSUFFICIENT_BUFFER);
+        memcpy(buffer, boundInf.c_str(), *bytes);
+        return TRUE;
+    }
+    BOOL WINAPI deletePackage(PCWSTR name, DWORD flags, PVOID reserved) {
+        if (flags || reserved || exists) return error(ERROR_INVALID_PARAMETER);
+        deleteAttempts.emplace_back(name);
+        if (deleteError && (failingPackage.empty() || failingPackage == name)) return error(deleteError);
+        deletedPackages.emplace_back(name);
+        return TRUE;
     }
     BOOL WINAPI enumInterface(HDEVINFO, PSP_DEVINFO_DATA, const GUID*, DWORD, PSP_DEVICE_INTERFACE_DATA) {
         return enabled && ticks >= interfaceReadyAt && (!startProblem || ticks < problemAt)
@@ -204,6 +234,8 @@ namespace fake {
 #define SetupDiSetDeviceInstallParamsW fake::setParams
 #define SetupDiSetClassInstallParamsW fake::setClassParams
 #define SetupCopyOEMInfW fake::copyInf
+#define SetupDiGetDevicePropertyW fake::driverProperty
+#define SetupUninstallOEMInfW fake::deletePackage
 #define SetupDiBuildDriverInfoList fake::buildDrivers
 #define SetupDiEnumDriverInfoW fake::enumDriver
 #define DiInstallDevice fake::install
@@ -220,6 +252,12 @@ namespace fake {
 #define CreateEventW fake::event
 #include "../cqkeysdll/pnp_device.cpp"
 
+void resetPackageState() {
+    g_stagedInf[0] = L'\0';
+    g_packagesToDelete.clear();
+    g_packageRemovalPending = false;
+}
+
 int failures = 0;
 void check(bool condition, const char* message) {
     if (!condition) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
@@ -229,6 +267,7 @@ int main() {
     fake::reset();
     bool escaped = false;
     BOOL installed = TRUE;
+    allocation_fault::targetSize = sizeof(L"C:\\test\\cqkeys.inf");
     allocation_fault::armed = true;
     try { installed = CqInstallDevice("C:\\test\\cqkeys.inf"); }
     catch (const std::bad_alloc&) { escaped = true; }
@@ -238,6 +277,7 @@ int main() {
     fake::reset(); fake::exists = fake::enabled = true;
     escaped = false;
     HANDLE interfaceHandle = nullptr;
+    allocation_fault::targetSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) + 128;
     allocation_fault::armed = true;
     try { interfaceHandle = CqOpenInterface(); }
     catch (const std::bad_alloc&) { escaped = true; }
@@ -249,13 +289,14 @@ int main() {
     oversizedPath += ".inf";
     escaped = false;
     installed = TRUE;
+    allocation_fault::targetSize = (oversizedPath.size() + 1) * sizeof(wchar_t);
     allocation_fault::armed = true;
     try { installed = CqInstallDevice(oversizedPath.c_str()); }
     catch (const std::bad_alloc&) { escaped = true; }
     bool rejectedBeforeAllocation = allocation_fault::armed;
     allocation_fault::armed = false;
     check(!escaped && !installed && rejectedBeforeAllocation && GetLastError() == ERROR_FILENAME_EXCED_RANGE,
-        "oversized package path is rejected before allocation");
+        "oversized package path is rejected before allocating its conversion buffer");
     fake::reset();
     check(!CqInstallDevice(nullptr) && GetLastError() == ERROR_INVALID_PARAMETER, "null path fails before PnP");
     check(!CqInstallDevice("C:\\test\\cqkeys.dll") && fake::creations == 0, "unsupported extension does not create node");
@@ -356,6 +397,75 @@ int main() {
     fake::reset(); fake::openError = ERROR_ACCESS_DENIED;
     check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == ERROR_ACCESS_DENIED && fake::statusQueries == 0,
         "non-retryable interface errors are not overwritten by PnP diagnostics");
+
+    fake::reset();
+    check(CqInstallDevice("C:\\test\\cqkeys.inf") && CqChangeDevice(true) && fake::deleteAttempts.empty(),
+        "ordinary removal preserves Driver Store packages");
+    fake::reset();
+    check(CqInstallDevice("C:\\test\\cqkeys.inf") && CqChangeDevice(true, true),
+        "explicit package removal follows successful device removal");
+    check(fake::deletedPackages == std::vector<std::wstring>{L"oem42.inf"},
+        "staged and bound package are deduplicated and deleted by exact published name without force");
+    check(CqChangeDevice(true, true) && fake::deleteAttempts.size() == 1,
+        "completed package removal is idempotent");
+
+    fake::reset();
+    check(CqInstallDevice("C:\\test\\cqkeys.inf"), "prepare package removal retry");
+    fake::deleteError = ERROR_INF_IN_USE_BY_DEVICES;
+    check(!CqChangeDevice(true, true) && GetLastError() == ERROR_INF_IN_USE_BY_DEVICES && !fake::exists,
+        "a shared package fails honestly after device removal");
+    check(!CqChangeDevice(true) && GetLastError() == ERROR_BUSY,
+        "ordinary unload cannot silently discard pending package deletion");
+    check(!CqReleaseSession() && GetLastError() == ERROR_BUSY,
+        "runtime cleanup cannot abandon pending package deletion");
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf") && GetLastError() == ERROR_BUSY,
+        "pending package deletion blocks a new installation");
+    fake::deleteError = 0;
+    check(CqChangeDevice(true, true) && fake::deletedPackages == std::vector<std::wstring>{L"oem42.inf"},
+        "retry retains exact package identity after the device is gone");
+
+    fake::reset(); fake::exists = true; fake::boundInf = L"oem41.inf";
+    fake::installError = ERROR_ACCESS_DENIED;
+    check(!CqInstallDevice("C:\\test\\cqkeys.inf"), "simulate update failure after staging");
+    fake::deleteError = ERROR_ACCESS_DENIED; fake::failingPackage = L"oem42.inf";
+    check(!CqChangeDevice(true, true) && GetLastError() == ERROR_ACCESS_DENIED &&
+        fake::deletedPackages == std::vector<std::wstring>{L"oem41.inf"},
+        "failed update targets both the previous binding and newly staged package");
+    fake::deleteError = 0;
+    check(CqChangeDevice(true, true) && fake::deletedPackages ==
+        std::vector<std::wstring>{L"oem41.inf", L"oem42.inf"} && fake::deleteAttempts.size() == 3,
+        "partial deletion retry does not delete an already completed package again");
+
+    fake::reset(); fake::exists = fake::enabled = true; fake::openError = ERROR_SHARING_VIOLATION;
+    check(!CqChangeDevice(true, true) && fake::deleteAttempts.empty() && fake::exists,
+        "open handles block package removal before changing the node");
+    fake::reset(); fake::exists = true; fake::wrongHardware = true;
+    check(!CqChangeDevice(true, true) && fake::deleteAttempts.empty() && fake::exists,
+        "mismatched hardware never authorizes package deletion");
+    fake::reset(); fake::exists = true; fake::bindingError = ERROR_ACCESS_DENIED;
+    check(!CqChangeDevice(true, true) && GetLastError() == ERROR_ACCESS_DENIED && fake::exists,
+        "unreadable package identity fails before node removal");
+    for (const wchar_t* invalidName : {L"cqkeys.inf", L"..\\oem42.inf", L"C:\\Windows\\INF\\oem42.inf", L"oem.inf"}) {
+        fake::reset(); fake::exists = true; fake::boundInf = invalidName;
+        check(!CqChangeDevice(true, true) && GetLastError() == ERROR_INVALID_DATA && fake::exists,
+            "only published OEM INF basenames are accepted for deletion");
+    }
+    fake::reset(); fake::exists = true; fake::bindingType = DEVPROP_TYPE_UINT32;
+    check(!CqChangeDevice(true, true) && GetLastError() == ERROR_INVALID_DATA && fake::exists,
+        "package identity property must be a string");
+    fake::reset(); fake::exists = true; fake::restart = true;
+    check(!CqChangeDevice(true, true) && GetLastError() == ERROR_SUCCESS_REBOOT_REQUIRED && fake::deleteAttempts.empty(),
+        "restart-required removal does not prematurely delete the package");
+    fake::reset(); fake::exists = true; fake::removalPending = true;
+    check(!CqChangeDevice(true, true) && GetLastError() == ERROR_BUSY && fake::deleteAttempts.empty(),
+        "package deletion waits for actual node disappearance");
+    fake::reset();
+    check(!CqChangeDevice(false, true) && GetLastError() == ERROR_INVALID_PARAMETER,
+        "package deletion cannot be combined with disable-only");
+    check(CqInstallDevice("C:\\test\\cqkeys.inf"), "stage package before external node removal");
+    fake::exists = fake::enabled = false;
+    check(CqChangeDevice(true, true) && fake::deletedPackages == std::vector<std::wstring>{L"oem42.inf"},
+        "session-staged package can be deleted after external node disappearance");
 
     fake::reset(); fake::leaseExists = true;
     check(!CqAcquireSession() && GetLastError() == ERROR_BUSY, "cross-process lease rejects existing event");

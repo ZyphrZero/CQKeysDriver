@@ -16,6 +16,9 @@
 namespace {
     const GUID kSystemClass = {0x4d36e97d, 0xe325, 0x11ce, {0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}};
     HANDLE g_sessionLease = nullptr;
+    wchar_t g_stagedInf[MAX_PATH]{};
+    std::vector<std::wstring> g_packagesToDelete;
+    bool g_packageRemovalPending = false;
 
     class DeviceInfoSet {
     public:
@@ -31,6 +34,49 @@ namespace {
     };
 
     BOOL Error(DWORD error) { SetLastError(error); return FALSE; }
+
+    bool IsPublishedInf(const wchar_t* name) {
+        if (_wcsnicmp(name, L"oem", 3) != 0) return false;
+        const wchar_t* suffix = name + 3;
+        if (*suffix < L'0' || *suffix > L'9') return false;
+        while (*suffix >= L'0' && *suffix <= L'9') ++suffix;
+        return _wcsicmp(suffix, L".inf") == 0;
+    }
+
+    BOOL PreparePackageRemoval(HDEVINFO devices, SP_DEVINFO_DATA* device) {
+        if (g_packageRemovalPending) return TRUE;
+        std::vector<std::wstring> packages;
+        if (*g_stagedInf) packages.emplace_back(g_stagedInf);
+        if (device) {
+            wchar_t boundInf[MAX_PATH]{};
+            DEVPROPTYPE type = 0;
+            DWORD bytes = 0;
+            if (!SetupDiGetDevicePropertyW(devices, device, &DEVPKEY_Device_DriverInfPath, &type,
+                    reinterpret_cast<PBYTE>(boundInf), sizeof(boundInf), &bytes, 0)) {
+                if (GetLastError() != ERROR_NOT_FOUND) return FALSE;
+            } else {
+                if (type != DEVPROP_TYPE_STRING || bytes < sizeof(wchar_t) || bytes > sizeof(boundInf) ||
+                    bytes % sizeof(wchar_t) || boundInf[bytes / sizeof(wchar_t) - 1] != L'\0' ||
+                    bytes != (wcslen(boundInf) + 1) * sizeof(wchar_t) || !IsPublishedInf(boundInf))
+                    return Error(ERROR_INVALID_DATA);
+                if (packages.empty() || _wcsicmp(packages.front().c_str(), boundInf) != 0)
+                    packages.emplace_back(boundInf);
+            }
+        }
+        g_packagesToDelete.swap(packages);
+        g_packageRemovalPending = true;
+        return TRUE;
+    }
+
+    BOOL DeletePreparedPackages() {
+        while (!g_packagesToDelete.empty()) {
+            if (!SetupUninstallOEMInfW(g_packagesToDelete.back().c_str(), 0, nullptr)) return FALSE;
+            g_packagesToDelete.pop_back();
+        }
+        g_stagedInf[0] = L'\0';
+        g_packageRemovalPending = false;
+        return TRUE;
+    }
 
     BOOL ValidateDevice(HDEVINFO devices, SP_DEVINFO_DATA& device) {
         wchar_t hardware[256]{};
@@ -146,8 +192,12 @@ BOOL CqAcquireSession() {
 }
 
 BOOL CqReleaseSession() {
+    if (g_packageRemovalPending) return Error(ERROR_BUSY);
     if (g_sessionLease && !CloseHandle(g_sessionLease)) return FALSE;
     g_sessionLease = nullptr;
+    g_stagedInf[0] = L'\0';
+    g_packagesToDelete.clear();
+    g_packageRemovalPending = false;
     return TRUE;
 }
 
@@ -177,6 +227,7 @@ HANDLE CqOpenInterface() try {
 }
 
 BOOL CqInstallDevice(const char* path, CqDriverStartResult* diagnostics) try {
+    if (g_packageRemovalPending) return Error(ERROR_BUSY);
     CqDriverStartResult local{sizeof(CqDriverStartResult), CQ_DRIVER_START_RESULT_ABI};
     if (!diagnostics) diagnostics = &local;
     *diagnostics = local;
@@ -197,8 +248,11 @@ BOOL CqInstallDevice(const char* path, CqDriverStartResult* diagnostics) try {
             !SetupDiCallClassInstaller(DIF_REGISTERDEVICE, devices.value, &device)) return FALSE;
     }
     if (!ValidateDevice(devices.value, device)) return FALSE;
-    wchar_t stagedInf[MAX_PATH];
+    wchar_t stagedInf[MAX_PATH]{};
     if (!SetupCopyOEMInfW(infPath.c_str(), nullptr, SPOST_PATH, 0, stagedInf, MAX_PATH, nullptr, nullptr)) return FALSE;
+    const wchar_t* publishedName = wcsrchr(stagedInf, L'\\');
+    if (!publishedName || !IsPublishedInf(publishedName + 1)) return Error(ERROR_INVALID_DATA);
+    wcscpy_s(g_stagedInf, publishedName + 1);
     SP_DEVINSTALL_PARAMS_W parameters{};
     parameters.cbSize = sizeof(parameters);
     if (!SetupDiGetDeviceInstallParamsW(devices.value, &device, &parameters)) return FALSE;
@@ -232,7 +286,9 @@ BOOL CqInstallDevice(const char* path, CqDriverStartResult* diagnostics) try {
     return Error(ERROR_NOT_ENOUGH_MEMORY);
 }
 
-BOOL CqChangeDevice(bool remove) {
+BOOL CqChangeDevice(bool remove, bool removePackage) try {
+    if (removePackage && !remove) return Error(ERROR_INVALID_PARAMETER);
+    if (g_packageRemovalPending && !removePackage) return Error(ERROR_BUSY);
     if (!CheckNoOpenSession()) return FALSE;
     DeviceInfoSet devices(SetupDiCreateDeviceInfoList(&kSystemClass, nullptr));
     if (devices.value == INVALID_HANDLE_VALUE) return FALSE;
@@ -240,10 +296,13 @@ BOOL CqChangeDevice(bool remove) {
     device.cbSize = sizeof(device);
     if (!SetupDiOpenDeviceInfoW(devices.value, CQKEYS_INSTANCE_ID, nullptr, 0, &device)) {
         if (GetLastError() != ERROR_NO_SUCH_DEVINST) return FALSE;
+        if (removePackage && (!PreparePackageRemoval(devices.value, nullptr) || !DeletePreparedPackages()))
+            return FALSE;
         SetLastError(ERROR_SUCCESS);
         return TRUE;
     }
     if (!ValidateDevice(devices.value, device)) return FALSE;
+    if (removePackage && !PreparePackageRemoval(devices.value, &device)) return FALSE;
     if (!remove) {
         if (!ChangeState(devices.value, device, DICS_DISABLE)) return FALSE;
         ULONG status = 0, problem = 0;
@@ -259,6 +318,9 @@ BOOL CqChangeDevice(bool remove) {
         if (result == CR_SUCCESS) return Error(ERROR_BUSY);
         if (result != CR_NO_SUCH_DEVNODE) return Error(CM_MapCrToWin32Err(result, ERROR_GEN_FAILURE));
     }
+    if (removePackage && !DeletePreparedPackages()) return FALSE;
     SetLastError(ERROR_SUCCESS);
     return TRUE;
+} catch (const std::bad_alloc&) {
+    return Error(ERROR_NOT_ENOUGH_MEMORY);
 }

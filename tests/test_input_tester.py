@@ -43,6 +43,44 @@ class InputTesterTests(unittest.TestCase):
         InputTester(native).repeat_key("a", 0.001, 0.002, 3)
         self.assertEqual(native.submissions, [([(1, 65, 0, 1), (2, 65, 0, 2)], 1000, 0)])
 
+    def test_run_actions_forwards_token_and_preserves_stop_and_callable(self):
+        tasks = Mock()
+        tester = InputTester(Mock(), tasks=tasks)
+        token = object()
+        cancelled, progress = Mock(return_value=False), Mock()
+        actions = tester.key_actions('a')
+        self.assertIs(tester.run_actions(actions, 2, 3, cancelled, progress, cancellation=token),
+                      tasks.run.return_value)
+        self.assertEqual(tasks.run.call_args.args, (actions, 2, 3))
+        options = tasks.run.call_args.kwargs
+        self.assertIs(options['cancellation'], token)
+        self.assertIs(options['progress'], progress)
+        self.assertFalse(options['cancelled']())
+        cancelled.return_value = True
+        self.assertTrue(options['cancelled']())
+        cancelled.reset_mock()
+        tester.stop()
+        self.assertTrue(options['cancelled']())
+        cancelled.assert_not_called()
+
+    def test_repeat_key_forwards_token_and_uses_exact_gui_milliseconds(self):
+        tasks = Mock()
+        token, progress = object(), Mock()
+        tester = InputTester(Mock(), tasks=tasks)
+        self.assertIs(tester.repeat_key('a', 2.007, .001, 4.016,
+                                       progress=progress, cancellation=token),
+                      tasks.run.return_value)
+        actions, repeats, delay = tasks.run.call_args.args
+        self.assertEqual([step.delayMs for step in actions], [2007, 1])
+        self.assertEqual((repeats, delay), (2, 0))
+        self.assertIs(tasks.run.call_args.kwargs['cancellation'], token)
+        self.assertIs(tasks.run.call_args.kwargs['progress'], progress)
+
+    def test_repeat_duration_selects_whole_cycles_not_a_hard_deadline(self):
+        native = native_tasks()
+        InputTester(native).repeat_key('a', .002, .003, .006)
+        self.assertEqual(native.submissions, [([(1, 65, 0, 2), (2, 65, 0, 3)], 2, 0)])
+
     def test_invalid_repeat_duration_and_overflow_are_rejected(self):
         for duration, hold, interval in ((0, .001, .001), (float("nan"), .001, .001),
                                          (1, 0, 0), (1000, .001, 0), (1, -1, .1)):

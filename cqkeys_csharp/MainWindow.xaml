@@ -58,6 +58,9 @@
         <StackPanel Grid.Row="4"
                     Orientation="Horizontal" 
                     HorizontalAlignment="Right">
+            <CheckBox x:Name="RemovePackageCheckBox" Content="卸载时删除 Driver Store 包（测试用）"
+                      IsChecked="False" VerticalAlignment="Center" Margin="0,0,16,0"
+                      ToolTip="仅显式卸载并确认后删除本次相关包；不强制删除占用包，不扫描历史包。"/>
             <Button x:Name="InstallButton"
                     Content="安装驱动"
                     Width="100"

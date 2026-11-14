@@ -4,16 +4,36 @@
 部署、权限、内核协议和隔离验收见 [项目说明](../README.md) 与 [生命周期契约](../docs/runtime-unload.md)。
 正式 C ABI 的字段和签名以 `cqkeysdll/cqkeys.h` 为准。
 
+## 路径与驱动包
+
+GUI 分别选择 `cqkeysdll.dll` 和完整包中的 `cqkeys.inf`，不再选择裸 SYS。
+安装前检查 DLL、INF 及 INF 同目录的 `cqkeys.sys`、`cqkeys.cat`，缺少任一文件或路径实际为目录时阻止加载，
+并列出所有缺失路径；检查通过不代表签名受信任，安装和连接仍以 DLL / Windows 的结果为准。
+配置使用 `dll_path` / `inf_path`；读取旧 `sys_path` 时明确提示并转换为同目录 INF，保存配置才移除旧字段。
+
+## 可选删除 Driver Store 包
+
+默认卸载只移除设备、保留包。测试时勾选“卸载时删除 Driver Store 包”，点击卸载并确认，
+GUI 调用 `DriverManager.cleanup(remove_package=True)`，通过新版 DLL 的 `UnloadNTDriverAndPackage` 执行清理。
+先完成输入停止、任务回收和设备移除，再删除本次暂存及设备绑定的 OEM 包；不会强制删除其他设备使用的包，
+也不会按名称扫描、删除全部历史版本。包删除失败仍是清理失败，管理对象和已确认的选择会保留以便重试。
+仅勾选后关闭窗口不会新发起包删除；已经确认但失败的删除请求在后续卸载/关闭中继续，不能静默退回普通卸载。
+需要重新构建并部署支持该导出接口的 DLL，不需要为本功能修改 SYS 或关闭签名检查。
+加载日志分别记录请求路径、Windows 模块句柄对应的实际 DLL 路径和删除接口是否可用。
+选择删除时先检查当前会话接口；不支持时不会开始停止/卸载或保留删除请求，可明确取消勾选后普通卸载。
+路径框和已保存配置只影响下一次加载，不会替换当前会话的 DLL；更新 DLL 后应在完成清理后重启程序。
+
 ## 生命周期
 
 | API | 语义 |
 |---|---|
 | GetLifecycleVersion | 返回 2，不是 SYS 产品版本或线协议版本 |
-| LoadNTDriver(name,path) | 显式安装/启用固定节点；name 仅支持 cqkeys，SYS 路径用于定位同目录 INF |
+| LoadNTDriver(name,path) | 显式安装/启用固定节点；name 仅支持 cqkeys，调用端传入 INF；原生接口保留 SYS 路径兼容 |
 | SetHandle | 连接已启用设备、验证能力、建立全新中性会话 |
 | StopInputProcessing | 内核会话停止屏障，保留句柄；成功后同一会话不能重新输入 |
 | StopNTDriver(name) | 停止/释放/关闭，然后禁用节点，保留包 |
 | UnloadNTDriver(name) | 停止/释放/关闭，然后移除节点，保留包 |
+| UnloadNTDriverAndPackage(name) | 停止/释放/关闭、移除节点，再非强制删除本次相关 OEM 包；失败保留重试状态 |
 | CleanupInputRuntime | 显式收束 DLL 输入运行时和连接，不执行 PnP 禁用/移除 |
 | GetDriverHandle | 仅借用；禁止关闭、直接发报告或跨进程转移 |
 
@@ -31,7 +51,7 @@
 
 - `KeyDown/KeyUp(USHORT virtualKey)`：Windows VK；普通键最多 6 个，左右修饰键独立。
 - `ConsumerKeyDown/ConsumerKeyUp(USHORT usage)`：一个 Consumer usage，0x0001–0x03ff。
-- `MouseMoveRELATIVE(LONG dx,LONG dy)`：原始 HID 计数，大位移拆成固定报告；失败不自动重放。
+- `MouseMoveRELATIVE(LONG dx,LONG dy)`：原始 HID 计数，每轴 ±8388352、每次最多 256 份报告；超限拒绝，失败不自动重放。
 - `MouseMoveABSOLUTE(LONG x,LONG y)`：主显示器像素坐标，不是虚拟多屏或 Unicode 输入接口。
 - Left/Right/Middle/XButton1/XButton2 的 Down/Up：保留其他已按鼠标按钮。
 - `MouseWheelUp/Down(USHORT delta)`：Windows 120 单位的整数倍，每次最多 127 格。
@@ -72,11 +92,29 @@ resultFlags 的 1/2/4 位分别表示部分完成、不确定结果、取消；�
 资源边界：动作 1–4096 个，重复 1–65535 次，每动作等待及重复间隔 0–60000ms。零重复不是无限任务。
 需要长业务时由调用端管理明确的有限任务，不在内核增加通用调度器。不承诺硬实时精度。
 
+高频重复放在一个任务中以避免逐次创建线程。正常完整任务只释放仍持有的输入；取消或不确定提交仍完整中性化。
+等待是动作完成后的相对毫秒等待，实际周期还包含 I/O 与调度耗时；GUI 时长仅按理论周期换算重复次数，不是硬截止时间。
+整数毫秒经秒数往返不会因二进制浮点误差额外进位；真正的小数毫秒仍向上取整。
+
+Python 的 `InputCancellation` 是单次提交的取消令牌。每个任务新建令牌，使用
+`repeat_key(..., cancellation=token)` 或 `run_actions(..., cancellation=token)` 传入；其他线程可调用 `token.cancel()` 直接通知该任务。
+提交前取消不会发送输入，提交期间的取消在绑定任务后送达；完成/释放时解除绑定，旧令牌不能取消下一任务。
+取消失败仍抛出真实错误并保留任务供重试；取消请求不等于任务结束，仍需等待和检查结果。现有 `cancelled` 回调继续兼容。
+
+## GUI 长时运行
+
+高频进度只保存最新快照，不逐次堆积 Tk 回调；任务终态和错误通知使用独立可靠通道。
+日志缓冲保留最近 256 条普通日志及 64 条错误日志，单条最多 2048 字符，溢出和截断数量显式显示。
+日志窗口最多保留 1000 行、64000 字符；它不是完整审计存储，长期诊断应另行保存所需日志。
+热键通知只保留一个待处理槽，每个 UI 轮次最多切换一次，过载合并次数显式记录；它不用于逐条计数热键事件。
+停止或重启热键监听会使旧代际回调失效，不能由旧通知重新启动自动移动。
+高频任务和自动移动各自持有取消令牌，停止按钮直接通知所属任务，不取消其他任务。
+
 ## 错误与结果
 
 Python 使用 `ctypes.CDLL(path, use_last_error=True)`，C# 使用 `CallingConvention.Cdecl`、`SetLastError=true`。
 BOOL 失败和 void 输入错误都须立即读取本次错误，不能在其他调用之后再读取。
-`GetDetailedErrorCode` 是兼容接口，不是所有线程或异步任务的唯一结果通道。
+`GetDetailedErrorCode` 是线程局部兼容接口，只表示当前线程最近一次 DLL 成功/失败，不是其他线程或异步任务的结果通道。
 
 `QueryDriverInfo` 返回独立的协议、驱动版本、能力和报告边界；`QueryInputState` 返回驱动权威状态与清理结果。
 二者需要当前连接，但查询结果不会把旧文件绑定刷新为新代际。

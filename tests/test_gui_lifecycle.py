@@ -19,15 +19,18 @@ class GuiLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.gui = CQKeysGUI.__new__(CQKeysGUI)
         self.gui.root = Mock()
-        self.gui._ui_events = queue.Queue()
-        self.gui._ui_generation = 0
-        self.gui._ui_closed = False
-        self.gui._log_handler = None
+        self.gui._init_ui_events()
+        self.gui._hook_generation = 0
+        self.gui._hook_enabled = False
+        self.gui._rapid_cancellation = self.gui._auto_move_cancellation = None
         self.gui.driver_mgr = Mock()
         self.gui.input_tester = Mock()
         self.gui.keyboard_hook = None
         self.gui.is_driver_loaded = True
         self.gui.is_closing = self.gui.is_unloading = False
+        self.gui._remove_package_requested = False
+        self.gui.remove_package_var = Mock()
+        self.gui.remove_package_var.get.return_value = False
         self.gui.auto_move_running = self.gui.rapid_test_running = True
         self.gui.input_workers = InputWorkers()
         self.gui._stop_results = queue.Queue()
@@ -46,9 +49,13 @@ class GuiLifecycleTests(unittest.TestCase):
 
     def test_unload_failure_preserves_manager_and_window_for_retry(self):
         manager = self.gui.driver_mgr
+        rapid_token = self.gui._rapid_cancellation = Mock()
+        move_token = self.gui._auto_move_cancellation = Mock()
         self.gui.is_closing = True
         self.gui._finish_unload(OSError("device busy"), close_after=True)
         self.assertIs(self.gui.driver_mgr, manager)
+        self.assertIs(self.gui._rapid_cancellation, rapid_token)
+        self.assertIs(self.gui._auto_move_cancellation, move_token)
         self.assertFalse(self.gui.is_closing)
         self.assertFalse(self.gui.is_driver_loaded)
         self.gui.root.destroy.assert_not_called()
@@ -60,22 +67,77 @@ class GuiLifecycleTests(unittest.TestCase):
 
     def test_unload_resets_pending_tasks_and_discards_old_ui_callbacks(self):
         self.gui._rapid_test_pending = self.gui._auto_move_pending = True
+        self.gui._rapid_cancellation = Mock()
+        self.gui._auto_move_cancellation = Mock()
         stale_callback = Mock()
         self.gui._post_ui(stale_callback)
         self.gui._finish_unload(None, close_after=False)
         self.gui._drain_ui_events()
         self.assertFalse(self.gui._rapid_test_pending)
         self.assertFalse(self.gui._auto_move_pending)
+        self.assertIsNone(self.gui._rapid_cancellation)
+        self.assertIsNone(self.gui._auto_move_cancellation)
         stale_callback.assert_not_called()
 
     def test_driver_and_tester_share_the_same_task_owner(self):
         self.gui.driver_mgr = None
-        self.gui.dll_path_var, self.gui.sys_path_var = Mock(), Mock()
+        self.gui.dll_path_var, self.gui.inf_path_var = Mock(), Mock()
         self.gui._check_driver_status = Mock()
         with patch.object(gui_module, "DriverManager") as manager:
             manager.return_value.initialize.return_value = True
             self.assertTrue(self.gui._load_driver())
         self.assertIs(self.gui.input_tester.tasks, self.gui.driver_mgr.tasks)
+        manager.return_value._setup_paths.assert_called_once_with(
+            dll_path=self.gui.dll_path_var.get(), inf_path=self.gui.inf_path_var.get())
+
+    def test_package_deletion_requires_explicit_confirmation(self):
+        self.gui.remove_package_var.get.return_value = True
+        with patch.object(gui_module.messagebox, "askyesno", return_value=False) as confirm, \
+                patch.object(self.gui, "_begin_unload") as unload:
+            self.gui._unload_driver()
+        confirm.assert_called_once()
+        unload.assert_not_called()
+        self.assertFalse(self.gui._remove_package_requested)
+
+    def test_confirmed_package_deletion_reaches_background_cleanup(self):
+        manager = self.gui.driver_mgr
+        self.gui.remove_package_var.get.return_value = True
+        with patch.object(gui_module.messagebox, "askyesno", return_value=True), \
+                patch.object(gui_module.threading, "Thread") as thread:
+            self.gui._unload_driver()
+            thread.call_args.kwargs["target"]()
+            self.gui._poll_stop(False)
+            thread.call_args.kwargs["target"]()
+        manager.cleanup.assert_called_once_with(remove_package=True)
+        self.gui._poll_cleanup(False)
+        self.assertFalse(self.gui._remove_package_requested)
+
+    def test_missing_export_does_not_latch_deletion_or_start_unload(self):
+        self.gui.remove_package_var.get.return_value = True
+        self.gui.driver_mgr.require_package_removal.side_effect = RuntimeError("loaded old DLL")
+        with patch.object(gui_module.messagebox, "askyesno", return_value=True), \
+                patch.object(self.gui, "_begin_unload") as unload:
+            self.gui._unload_driver()
+        unload.assert_not_called()
+        self.assertFalse(self.gui._remove_package_requested)
+        self.gui.driver_mgr.stop_input.assert_not_called()
+        self.gui.driver_mgr.cleanup.assert_not_called()
+        gui_module.messagebox.showerror.assert_called_once()
+        self.gui.remove_package_var.get.return_value = False
+        with patch.object(self.gui, "_begin_unload") as unload:
+            self.gui._unload_driver()
+        unload.assert_called_once()
+        self.assertFalse(self.gui._remove_package_requested)
+
+    def test_close_does_not_turn_a_checked_option_into_deletion(self):
+        self.gui.remove_package_var.get.return_value = True
+        manager = self.gui.driver_mgr
+        with patch.object(gui_module.threading, "Thread") as thread:
+            self.gui._begin_unload(close_after=True)
+            thread.call_args.kwargs["target"]()
+            self.gui._poll_stop(True)
+            thread.call_args.kwargs["target"]()
+        manager.cleanup.assert_called_once_with(remove_package=False)
 
     def test_unload_cancels_input_before_waiting(self):
         with patch.object(gui_module.threading, "Thread") as thread:
@@ -87,6 +149,26 @@ class GuiLifecycleTests(unittest.TestCase):
         self.gui.input_tester.stop.assert_called_once()
         self.gui.driver_mgr.cleanup.assert_not_called()
         self.gui.root.after.assert_called_once_with(25, self.gui._poll_stop, False)
+
+    def test_unload_failure_keeps_old_hotkeys_disabled_without_losing_other_callbacks(self):
+        self.gui.hotkey_var = Mock()
+        self.gui.hotkey_var.get.return_value = "F8"
+        with patch.object(gui_module, "KeyboardHook") as hook:
+            self.gui._toggle_keyboard_hook()
+        hotkey = hook.return_value.register_hotkey.call_args.args[1]
+        self.gui._toggle_auto_move = Mock()
+        terminal = Mock()
+        hotkey()
+        self.gui._post_ui(terminal)
+        with patch.object(gui_module.threading, "Thread") as thread:
+            thread.return_value.start.side_effect = RuntimeError("thread unavailable")
+            self.gui._begin_unload()
+        hotkey()
+        self.gui._drain_ui_events()
+        self.gui._toggle_auto_move.assert_not_called()
+        terminal.assert_called_once()
+        self.assertIs(self.gui.keyboard_hook, hook.return_value)
+        self.assertFalse(self.gui._hook_enabled)
 
     def test_native_stop_starts_while_input_worker_is_still_running(self):
         worker_entered = threading.Event()

@@ -17,12 +17,16 @@ namespace {
     std::mutex g_controlMutex;
     std::mutex g_taskMutex;
     std::condition_variable g_taskCondition;
+    std::condition_variable g_deviceCondition;
     HANDLE g_device = INVALID_HANDLE_VALUE;
+    HANDLE g_reportEvent = nullptr;
+    size_t g_queries = 0;
     std::atomic<bool> g_acceptingInput{false};
     std::atomic<uint32_t> g_stopRequests{0};
     std::atomic<bool> g_taskActive{false};
     std::atomic<bool> g_taskCancelled{false};
     bool g_ownsSession = false;
+    bool g_packageRemovalCompleted = false;
     bool g_cleanupRequired = false;
     DWORD g_retiredCleanupError = ERROR_SUCCESS;
     CqKeyboardReport g_keyboard{CQKEYS_KEYBOARD_ID};
@@ -43,17 +47,45 @@ namespace {
     thread_local bool g_taskCleanup = false;
     thread_local CqInputResult g_lastInput{sizeof(CqInputResult), CQ_INPUT_RESULT_ABI};
     std::atomic<DEVICE_STATUS> g_status{DEVICE_STATUS_UNKNOWN};
-    std::atomic<DWORD> g_error{ERROR_SUCCESS};
+    thread_local DWORD g_error = ERROR_SUCCESS;
     thread_local CqDriverStartResult g_lastDriverStart{sizeof(CqDriverStartResult), CQ_DRIVER_START_RESULT_ABI};
     std::atomic<ULONGLONG> g_lastCheck{0};
 
+    void SignalTaskCancellation();
+
     struct StopRequest {
         StopRequest() {
-            std::lock_guard<std::mutex> state(g_deviceMutex);
-            ++g_stopRequests;
-            g_acceptingInput = false;
+            {
+                std::lock_guard<std::mutex> state(g_deviceMutex);
+                ++g_stopRequests;
+                g_acceptingInput = false;
+            }
+            SignalTaskCancellation();
         }
         ~StopRequest() { --g_stopRequests; }
+    };
+
+    class DeviceQuery {
+    public:
+        DeviceQuery() {
+            std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+            std::lock_guard<std::mutex> state(g_deviceMutex);
+            device = g_device;
+            if (device != INVALID_HANDLE_VALUE) ++g_queries;
+        }
+        ~DeviceQuery() {
+            if (device == INVALID_HANDLE_VALUE) return;
+            DWORD error = GetLastError();
+            {
+                std::lock_guard<std::mutex> state(g_deviceMutex);
+                --g_queries;
+            }
+            g_deviceCondition.notify_all();
+            SetLastError(error);
+        }
+        DeviceQuery(const DeviceQuery&) = delete;
+        DeviceQuery& operator=(const DeviceQuery&) = delete;
+        HANDLE device = INVALID_HANDLE_VALUE;
     };
 
     BOOL Fail(DWORD error) {
@@ -79,7 +111,11 @@ namespace {
                     void* output, DWORD outputSize, DWORD& returned, bool report = false, bool* issued = nullptr) {
         if (issued) *issued = false;
         OVERLAPPED operation{};
-        operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (report) {
+            if (!g_reportEvent) g_reportEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            else if (!ResetEvent(g_reportEvent)) return GetLastError();
+            operation.hEvent = g_reportEvent;
+        } else operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!operation.hEvent) return GetLastError();
         DWORD error = ERROR_SUCCESS;
         BOOL completed = FALSE;
@@ -108,13 +144,12 @@ namespace {
             std::lock_guard<std::mutex> state(g_deviceMutex);
             if (g_pendingReport == &operation) g_pendingReport = nullptr;
         }
-        if (!CloseHandle(operation.hEvent) && error == ERROR_SUCCESS) error = GetLastError();
+        if (!report && !CloseHandle(operation.hEvent) && error == ERROR_SUCCESS) error = GetLastError();
         return error;
     }
 
-    DWORD ReadState(CqDeviceState& snapshot) {
-        HANDLE device;
-        {
+    DWORD ReadState(CqDeviceState& snapshot, HANDLE device = INVALID_HANDLE_VALUE) {
+        if (device == INVALID_HANDLE_VALUE) {
             std::lock_guard<std::mutex> state(g_deviceMutex);
             device = g_device;
         }
@@ -224,10 +259,20 @@ namespace {
         return error ? error : joinError;
     }
 
+    DWORD CloseReportEvent() {
+        std::lock_guard<std::mutex> input(g_inputMutex);
+        if (g_reportEvent && !CloseHandle(g_reportEvent)) return GetLastError();
+        g_reportEvent = nullptr;
+        return ERROR_SUCCESS;
+    }
+
     DWORD RetireDisconnectedDevice(DWORD error) {
         if ((error != ERROR_DEVICE_NOT_CONNECTED && error != ERROR_NO_SUCH_DEVICE) ||
             g_taskThread || g_taskActive) return error;
-        std::lock_guard<std::mutex> state(g_deviceMutex);
+        DWORD eventError = CloseReportEvent();
+        if (eventError) return eventError;
+        std::unique_lock<std::mutex> state(g_deviceMutex);
+        g_deviceCondition.wait(state, [] { return g_queries == 0; });
         if (g_pendingReport) return error;
         if (g_device != INVALID_HANDLE_VALUE) {
             if (!CloseHandle(g_device)) return GetLastError();
@@ -242,7 +287,10 @@ namespace {
     BOOL CloseDevice() {
         DWORD error = Quiesce();
         if (error) return Fail(RetireDisconnectedDevice(error));
-        std::lock_guard<std::mutex> state(g_deviceMutex);
+        error = CloseReportEvent();
+        if (error) return Fail(error);
+        std::unique_lock<std::mutex> state(g_deviceMutex);
+        g_deviceCondition.wait(state, [] { return g_queries == 0; });
         if (g_device != INVALID_HANDLE_VALUE) {
             if (!CloseHandle(g_device)) return Fail(GetLastError());
             g_device = INVALID_HANDLE_VALUE;
@@ -252,7 +300,7 @@ namespace {
         return Success();
     }
 
-    BOOL QueryStatus() {
+    BOOL QueryStatus(HANDLE device = INVALID_HANDLE_VALUE) {
         FILETIME time;
         GetSystemTimeAsFileTime(&time);
         ULARGE_INTEGER ticks;
@@ -261,7 +309,7 @@ namespace {
         g_lastCheck = (ticks.QuadPart - 116444736000000000ull) / 10000;
         g_status = DEVICE_STATUS_ERROR;
         CqDeviceState snapshot{};
-        DWORD error = ReadState(snapshot);
+        DWORD error = ReadState(snapshot, device);
         if (error) { g_acceptingInput = false; return Fail(error); }
         std::lock_guard<std::mutex> state(g_deviceMutex);
         if (snapshot.header.deviceEpoch != g_epoch || snapshot.header.sessionId != g_session ||
@@ -432,7 +480,13 @@ namespace {
         SendReport(report);
     }
 
+    bool ValidRelativeMove(LONG deltaX, LONG deltaY) {
+        auto magnitude = [](LONG value) { return value < 0 ? -static_cast<int64_t>(value) : static_cast<int64_t>(value); };
+        return (std::max)(magnitude(deltaX), magnitude(deltaY)) <= 32767LL * CQ_INPUT_MAX_MOVE_REPORTS;
+    }
+
     void MoveRelative(LONG deltaX, LONG deltaY) {
+        if (!ValidRelativeMove(deltaX, deltaY)) { Fail(ERROR_INVALID_PARAMETER); return; }
         do {
             auto stepX = static_cast<int16_t>((std::max)(-32767L, (std::min)(32767L, deltaX)));
             auto stepY = static_cast<int16_t>((std::max)(-32767L, (std::min)(32767L, deltaY)));
@@ -482,7 +536,7 @@ namespace {
                 (KeyboardUsage(static_cast<USHORT>(action.value1)) || ConsumerUsage(static_cast<USHORT>(action.value1)));
         case CQ_INPUT_CONSUMER_DOWN: case CQ_INPUT_CONSUMER_UP:
             return action.value2 == 0 && action.value1 > 0 && action.value1 <= 0x3ff;
-        case CQ_INPUT_MOVE_RELATIVE: return true;
+        case CQ_INPUT_MOVE_RELATIVE: return ValidRelativeMove(action.value1, action.value2);
         case CQ_INPUT_MOVE_ABSOLUTE: return action.value1 >= 0 && action.value2 >= 0;
         case CQ_INPUT_BUTTONS: return action.value2 == 0 && action.value1 >= 0 && action.value1 <= 31;
         case CQ_INPUT_WHEEL: return action.value2 == 0 && action.value1 >= -127 && action.value1 <= 127;
@@ -514,17 +568,22 @@ namespace {
     }
 
     bool TaskDelay(uint32_t delay) {
+        if (!delay) return !g_taskCancelled;
         std::unique_lock<std::mutex> task(g_taskMutex);
         return !g_taskCondition.wait_for(task, std::chrono::milliseconds(delay), [] { return g_taskCancelled.load(); });
     }
 
-    DWORD ReleaseTaskInput() {
+    DWORD ReleaseTaskInput(bool forceAll) {
         g_taskCleanup = true;
         CqKeyboardReport keyboard{CQKEYS_KEYBOARD_ID};
         CqMouseReport mouse{CQKEYS_MOUSE_ID};
         CqConsumerReport consumer{CQKEYS_CONSUMER_ID};
         DWORD error = ERROR_SUCCESS;
-        if (!SendReport(keyboard) || !SendReport(mouse) || !SendReport(consumer)) error = GetLastError();
+        bool keyboardHeld = g_keyboard.modifiers ||
+            std::any_of(std::begin(g_keyboard.keys), std::end(g_keyboard.keys), [](uint8_t key) { return key != 0; });
+        if (((forceAll || keyboardHeld) && !SendReport(keyboard)) ||
+            ((forceAll || g_buttons) && !SendReport(mouse)) ||
+            ((forceAll || g_consumer) && !SendReport(consumer))) error = GetLastError();
         if (!error) ClearInputState();
         g_taskCleanup = false;
         return error;
@@ -569,7 +628,7 @@ namespace {
             std::lock_guard<std::mutex> input(g_inputMutex);
             if ((!error || taskCancellation) && g_acceptingInput) {
                 g_lastInput = {sizeof(CqInputResult), CQ_INPUT_RESULT_ABI};
-                cleanupError = ReleaseTaskInput();
+                cleanupError = ReleaseTaskInput(g_taskCancelled || (resultFlags & CQ_INPUT_RESULT_UNCERTAIN));
                 resultFlags |= g_lastInput.flags;
             }
         }
@@ -620,18 +679,20 @@ namespace {
         return 0;
     }
 
-    BOOL StopDriver(const char* name, bool remove) {
+    BOOL StopDriver(const char* name, bool remove, bool removePackage = false) {
         if (!ValidateName(name)) return FALSE;
         StopRequest stopping;
         std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
-        if (!g_ownsSession) return Success();
+        if (!g_ownsSession)
+            return removePackage && !g_packageRemovalCompleted ? Fail(ERROR_INVALID_STATE) : Success();
         bool retired = g_device == INVALID_HANDLE_VALUE && g_retiredCleanupError != ERROR_SUCCESS;
         if (!CloseDevice() && (!retired || GetLastError() != g_retiredCleanupError)) return FALSE;
         DWORD error = JoinTask(true);
         if (error) return Fail(error);
-        if (!CqChangeDevice(remove)) return Fail(GetLastError());
+        if (!CqChangeDevice(remove, removePackage)) return Fail(GetLastError());
         if (!CqReleaseSession()) return Fail(GetLastError());
         g_ownsSession = false;
+        g_packageRemovalCompleted = removePackage;
         g_cleanupRequired = false;
         g_retiredCleanupError = ERROR_SUCCESS;
         return Success();
@@ -642,12 +703,12 @@ DWORD __cdecl GetLifecycleVersion() { return CQKEYS_LIFECYCLE_ABI; }
 
 BOOL __cdecl QueryDriverInfo(CqDeviceInfo* info) {
     if (!info) return Fail(ERROR_INVALID_PARAMETER);
-    std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
-    if (g_device == INVALID_HANDLE_VALUE) return Fail(ERROR_INVALID_HANDLE);
+    DeviceQuery query;
+    if (query.device == INVALID_HANDLE_VALUE) return Fail(ERROR_INVALID_HANDLE);
     auto request = CqHeader(sizeof(CqRequestHeader));
     CqDeviceInfo response{};
     DWORD returned = 0;
-    DWORD error = IoControl(g_device, IOCTL_CQKEYS_QUERY_INFO, &request, sizeof(request),
+    DWORD error = IoControl(query.device, IOCTL_CQKEYS_QUERY_INFO, &request, sizeof(request),
         &response, sizeof(response), returned);
     if (!error && (returned != sizeof(response) || !CqValidHeader(response.header, sizeof(response)) ||
         !response.header.deviceEpoch || response.header.sessionId || response.reserved)) error = ERROR_INVALID_DATA;
@@ -658,9 +719,10 @@ BOOL __cdecl QueryDriverInfo(CqDeviceInfo* info) {
 
 BOOL __cdecl QueryInputState(CqDeviceState* state) {
     if (!state) return Fail(ERROR_INVALID_PARAMETER);
-    std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+    DeviceQuery query;
+    if (query.device == INVALID_HANDLE_VALUE) return Fail(ERROR_INVALID_HANDLE);
     CqDeviceState snapshot{};
-    DWORD error = ReadState(snapshot);
+    DWORD error = ReadState(snapshot, query.device);
     if (error) return Fail(error);
     std::lock_guard<std::mutex> device(g_deviceMutex);
     *state = snapshot;
@@ -685,6 +747,7 @@ BOOL __cdecl LoadNTDriver(const char* name, const char* path) {
     };
     if (!ValidateName(name)) return fail(GetLastError());
     if (g_device != INVALID_HANDLE_VALUE || g_cleanupRequired) return fail(ERROR_BUSY);
+    g_packageRemovalCompleted = false;
     if (!CqAcquireSession()) return fail(GetLastError());
     g_ownsSession = true;
     if (!CqInstallDevice(path, &g_lastDriverStart)) return fail(GetLastError());
@@ -698,10 +761,12 @@ BOOL __cdecl GetLastDriverStartResult(CqDriverStartResult* result) {
 }
 BOOL __cdecl StopNTDriver(const char* name) { return StopDriver(name, false); }
 BOOL __cdecl UnloadNTDriver(const char* name) { return StopDriver(name, true); }
+BOOL __cdecl UnloadNTDriverAndPackage(const char* name) { return StopDriver(name, true, true); }
 BOOL __cdecl SetHandle() {
     std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
     if (g_cleanupRequired || g_stopRequests) return Fail(ERROR_BUSY);
     if (g_device != INVALID_HANDLE_VALUE) return g_acceptingInput ? Success() : Fail(ERROR_BUSY);
+    g_packageRemovalCompleted = false;
     if (!CqAcquireSession()) return Fail(GetLastError());
     g_ownsSession = true;
     HANDLE device = CqOpenInterface();
@@ -757,11 +822,15 @@ BOOL __cdecl StopInputProcessing() {
     DWORD error = Quiesce();
     return error ? Fail(RetireDisconnectedDevice(error)) : Success();
 }
-void __cdecl CheckDeviceStatus() { std::lock_guard<std::mutex> lock(g_lifecycleMutex); QueryStatus(); }
+void __cdecl CheckDeviceStatus() {
+    DeviceQuery query;
+    if (query.device == INVALID_HANDLE_VALUE) { g_status = DEVICE_STATUS_ERROR; Fail(ERROR_INVALID_HANDLE); return; }
+    QueryStatus(query.device);
+}
 DEVICE_STATUS __cdecl GetDriverStatus() { return g_status.load(); }
 ULONGLONG __cdecl GetLastCheckTime() { return g_lastCheck.load(); }
 HANDLE __cdecl GetDriverHandle() { std::lock_guard<std::mutex> lock(g_deviceMutex); return g_device; }
-int __cdecl GetDetailedErrorCode() { return static_cast<int>(g_error.load()); }
+int __cdecl GetDetailedErrorCode() { return static_cast<int>(g_error); }
 void __cdecl KeyDown(USHORT key) { LegacyInput([=] { KeyboardInput(key, true); }); }
 void __cdecl KeyUp(USHORT key) { LegacyInput([=] { KeyboardInput(key, false); }); }
 void __cdecl ConsumerKeyDown(USHORT usage) { LegacyInput([=] { ConsumerInput(usage, true); }); }
@@ -827,13 +896,11 @@ BOOL __cdecl SubmitInputTask(const CqInputAction* actions, uint32_t count, uint3
 }
 
 BOOL __cdecl CancelInputTask(uint64_t taskId) {
-    std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
-    {
-        std::lock_guard<std::mutex> task(g_taskMutex);
-        if (!taskId || g_taskResult.taskId != taskId) return Fail(ERROR_NOT_FOUND);
-        if (g_taskResult.state != CQ_INPUT_TASK_RUNNING) return Success();
-    }
-    SignalTaskCancellation();
+    std::lock_guard<std::mutex> task(g_taskMutex);
+    if (!taskId || g_taskResult.taskId != taskId) return Fail(ERROR_NOT_FOUND);
+    if (g_taskResult.state != CQ_INPUT_TASK_RUNNING) return Success();
+    g_taskCancelled = true;
+    g_taskCondition.notify_all();
     DWORD error = CancelReport(true);
     return error ? Fail(error) : Success();
 }

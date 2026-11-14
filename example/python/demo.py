@@ -59,6 +59,7 @@ class CqKeys:
             raise ValueError(f"DLL 路径不是文件：{path}")
         self.native = ctypes.CDLL(str(path), use_last_error=True)
         self.needs_cleanup = False
+        self.remove_package_pending = False
         signatures = {
             "GetLifecycleVersion": ([], ctypes.c_uint32),
             "LoadNTDriver": ([ctypes.c_char_p, ctypes.c_char_p], ctypes.c_int),
@@ -122,13 +123,23 @@ class CqKeys:
                                    action(MOVE_RELATIVE, delta_x, delta_y)])
         self.call("MouseMoveRELATIVE", delta_x, delta_y)
 
-    def close(self, uninstall=False):
+    def close(self, uninstall=False, remove_package=False):
         if self.needs_cleanup:
-            self.tasks.collect()
             operation = "UnloadNTDriver" if uninstall else "StopNTDriver"
+            if remove_package or self.remove_package_pending:
+                operation = "UnloadNTDriverAndPackage"
+                try:
+                    native = getattr(self.native, operation)
+                except AttributeError as error:
+                    raise RuntimeError("DLL 缺少 Driver Store 删除接口，请更新 cqkeysdll.dll；未退回普通卸载") from error
+                native.argtypes = [ctypes.c_char_p]
+                native.restype = ctypes.c_int
+                self.remove_package_pending = True
+            self.tasks.collect()
             self.call(operation, b"cqkeys", boolean=True)
             self.tasks.cleanup()
             self.needs_cleanup = False
+            self.remove_package_pending = False
 
 
 def integer(value):
@@ -148,6 +159,8 @@ def parse_args(argv=None):
     action.add_argument("--consumer", type=integer, help="按下并释放媒体 usage，例如 0xCD 表示播放/暂停")
     parser.add_argument("--delay", type=float, default=3.0, help="发送输入前的等待秒数，默认 3 秒")
     parser.add_argument("--uninstall", action="store_true", help="退出时移除 PnP 节点；默认禁用节点，均保留驱动包")
+    parser.add_argument("--remove-package", action="store_true",
+                        help="退出时移除设备并删除本次相关 Driver Store 包（隐含 --uninstall）；不强制删除占用包或扫描历史包")
     args = parser.parse_args(argv)
     if not math.isfinite(args.delay) or not 0 <= args.delay <= 60:
         parser.error("--delay 必须在 0 到 60 秒之间")
@@ -194,9 +207,10 @@ def main(argv=None):
     finally:
         if client is not None and client.needs_cleanup:
             try:
-                client.close(uninstall=args.uninstall)
+                client.close(uninstall=args.uninstall, remove_package=args.remove_package)
                 if exit_code == 0:
-                    print("管理会话已清理，Driver Store 中的驱动包保留。")
+                    print("管理会话和本次相关 Driver Store 包已清理；未扫描历史包。" if args.remove_package
+                          else "管理会话已清理，Driver Store 中的驱动包保留。")
                 else:
                     print("已清理本次管理会话；驱动测试仍然失败。")
             except (OSError, RuntimeError) as error:

@@ -28,6 +28,7 @@ class PythonDemoTests(unittest.TestCase):
         self.native.CheckDeviceStatus.return_value = None
         self.native.StopNTDriver.return_value = 1
         self.native.UnloadNTDriver.return_value = 1
+        self.native.UnloadNTDriverAndPackage.return_value = 1
         self.loader = patch("example.python.demo.ctypes.CDLL", return_value=self.native)
         self.load_dll = self.loader.start()
         self.addCleanup(self.loader.stop)
@@ -132,6 +133,39 @@ class PythonDemoTests(unittest.TestCase):
         self.native.MouseMoveRELATIVE.assert_not_called()
         self.native.ConsumerKeyDown.assert_not_called()
         self.native.StopNTDriver.assert_called_once_with(b"cqkeys")
+        self.native.UnloadNTDriverAndPackage.assert_not_called()
+
+    def test_cli_package_removal_is_explicit_and_implies_device_removal(self):
+        output = io.StringIO()
+        with patch("example.python.demo.require_windows_admin"), contextlib.redirect_stdout(output):
+            self.assertEqual(main(["--dll", str(self.dll), "--inf", str(self.package()), "--remove-package"]), 0)
+        self.native.UnloadNTDriverAndPackage.assert_called_once_with(b"cqkeys")
+        self.native.StopNTDriver.assert_not_called()
+        self.native.UnloadNTDriver.assert_not_called()
+        self.assertIn("相关 Driver Store 包已清理", output.getvalue())
+
+    def test_package_removal_failure_keeps_choice_for_retry(self):
+        client = CqKeys(self.dll)
+        client.connect(self.package())
+        self.native.UnloadNTDriverAndPackage.side_effect = lambda *_: (ctypes.set_last_error(5), 0)[1]
+        with self.assertRaises(DriverCallError):
+            client.close(remove_package=True)
+        self.assertTrue(client.needs_cleanup)
+        self.native.UnloadNTDriverAndPackage.side_effect = None
+        client.close()
+        self.assertFalse(client.needs_cleanup)
+        self.assertEqual(self.native.UnloadNTDriverAndPackage.call_count, 2)
+        self.native.StopNTDriver.assert_not_called()
+
+    def test_missing_package_removal_export_never_falls_back(self):
+        client = CqKeys(self.dll)
+        client.connect()
+        del self.native.UnloadNTDriverAndPackage
+        with self.assertRaisesRegex(RuntimeError, "更新 cqkeysdll.dll"):
+            client.close(remove_package=True)
+        self.assertTrue(client.needs_cleanup)
+        self.native.UnloadNTDriver.assert_not_called()
+        self.native.StopNTDriver.assert_not_called()
 
     def test_cli_reports_install_and_cleanup_failures(self):
         self.native.LoadNTDriver.side_effect = lambda *_: (ctypes.set_last_error(577), 0)[1]

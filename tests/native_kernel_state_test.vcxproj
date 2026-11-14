@@ -6,7 +6,7 @@
   </ItemGroup>
   <PropertyGroup Label="Globals"><ProjectGuid>{BA4D9205-40EC-45B3-9E43-86E938D9AEE2}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
   <Import Project="$(VCTargetsPath)Microsoft.Cpp.Default.props" />
-  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset><UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries></PropertyGroup>
+  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries></PropertyGroup>
   <Import Project="$(VCTargetsPath)Microsoft.Cpp.props" />
   <PropertyGroup><OutDir>$(ProjectDir)bin\$(Configuration)\</OutDir><IntDir>$(ProjectDir)obj\$(ProjectName)\$(Configuration)\</IntDir></PropertyGroup>
   <ItemDefinitionGroup>

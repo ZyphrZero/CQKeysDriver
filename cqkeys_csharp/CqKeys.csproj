@@ -108,12 +108,18 @@
   <PropertyGroup>
     <PlatformTarget>x64</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
+    <CqKeysNativeDll Condition="'$(CqKeysNativeDll)' == ''">$(MSBuildThisFileDirectory)..\cqkeysdll\x64\$(Configuration)\cqkeysdll.dll</CqKeysNativeDll>
   </PropertyGroup>
-  <ItemGroup>
-    <Content Include="dll\cqkeysdll.dll" Condition="Exists('dll\cqkeysdll.dll')">
-      <TargetPath>cqkeysdll.dll</TargetPath>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Target Name="ValidateCqKeysNativeDll" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Error Condition="!Exists('$(CqKeysNativeDll)')"
+           Text="找不到原生 DLL: $(CqKeysNativeDll)。请先构建 cqkeysdll 的 $(Configuration)|x64，或用 /p:CqKeysNativeDll=完整路径 指定 DLL；不会沿用输出目录中的旧副本。" />
+  </Target>
+  <Target Name="CopyCqKeysNativeDll" AfterTargets="CopyFilesToOutputDirectory" DependsOnTargets="ValidateCqKeysNativeDll" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Message Importance="high" Text="CQKeys 原生 DLL: $(CqKeysNativeDll) -&gt; $(TargetDir)cqkeysdll.dll" />
+    <Copy SourceFiles="$(CqKeysNativeDll)" DestinationFiles="$(TargetDir)cqkeysdll.dll" SkipUnchangedFiles="false" />
+    <ItemGroup>
+      <FileWrites Include="$(TargetDir)cqkeysdll.dll" />
+    </ItemGroup>
+  </Target>
 </Project>

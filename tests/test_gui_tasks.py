@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from test_gui_lifecycle import CQKeysGUI, gui_module
 from test_input_tasks import native_tasks
 from input_tester import InputTester
-from input_tasks import InputTasks, FAILED, CANCELLED, RUNNING, COMPLETED
+from input_tasks import InputTasks, InputCancellation, FAILED, CANCELLED, RUNNING, COMPLETED
 from input_workers import InputWorkers, WorkCancelled
 from driver_manager import DriverManager
 
@@ -20,15 +20,17 @@ class GuiTaskTests(unittest.TestCase):
         self.native = native_tasks()
         self.gui = CQKeysGUI.__new__(CQKeysGUI)
         self.gui.root = Mock()
-        self.gui._ui_events = queue.Queue()
-        self.gui._ui_generation = 0
-        self.gui._ui_closed = False
-        self.gui._log_handler = None
+        self.gui._init_ui_events()
+        self.gui._hook_generation = 0
+        self.gui._hook_enabled = False
+        self.gui.keyboard_hook = None
+        self.gui._rapid_cancellation = self.gui._auto_move_cancellation = None
         self.gui._input_release_error = None
         self.gui._management_cleanup_error = None
         self.gui.input_tester = InputTester(self.native)
         self.gui.is_driver_loaded = True
         self.gui.is_unloading = self.gui.is_closing = False
+        self.gui._remove_package_requested = False
         self.gui.rapid_test_running = self.gui.auto_move_running = True
         self.gui._rapid_test_pending = self.gui._auto_move_pending = False
         self.gui.input_workers = Mock()
@@ -122,6 +124,8 @@ class GuiTaskTests(unittest.TestCase):
         level = logger.level
         with patch.object(gui_module, "ttk"), patch.object(gui_module.tk, "Text"):
             self.gui._setup_logging()
+        self.gui.log_text.index.return_value = "1.0"
+        self.gui.log_text.count.return_value = (0,)
         handler = self.gui._log_handler
         self.addCleanup(logger.removeHandler, handler)
         self.addCleanup(logger.setLevel, level)
@@ -174,7 +178,7 @@ class GuiTaskTests(unittest.TestCase):
         self.assertIn("metrics unavailable", gui_module.messagebox.showerror.call_args.args[1])
 
     def test_rapid_worker_never_calls_tk_even_to_schedule(self):
-        self.run_background(self.gui._run_rapid_test, ("a", .001, .001, 1))
+        self.run_background(self.gui._run_rapid_test, ("a", .001, .001, 1, InputCancellation()))
         self.gui.root.after.assert_not_called()
         self.gui.rapid_test_status.config.assert_not_called()
         self.flush_ui()
@@ -199,6 +203,106 @@ class GuiTaskTests(unittest.TestCase):
         self.gui.start_hook_btn.config.assert_called_with(text="启动热键监听")
         gui_module.messagebox.showerror.assert_called_once()
 
+    def start_fake_hook(self, hook=None):
+        self.gui.keyboard_hook = None
+        self.gui.hotkey_var = Mock()
+        self.gui.hotkey_var.get.return_value = "F8"
+        hook = hook if hook is not None else Mock()
+        with patch.object(gui_module, "KeyboardHook", return_value=hook):
+            self.gui._toggle_keyboard_hook()
+        return hook, hook.register_hotkey.call_args.args[1]
+
+    def test_stopping_hook_invalidates_queued_and_late_hotkeys_only(self):
+        hook, hotkey = self.start_fake_hook()
+        self.gui._toggle_auto_move = Mock()
+        unrelated = Mock()
+        self.gui._post_ui(unrelated)
+        hotkey()
+        self.gui._toggle_keyboard_hook()
+        hotkey()
+        self.flush_ui()
+        self.gui._toggle_auto_move.assert_not_called()
+        unrelated.assert_called_once()
+        hook.stop.assert_called_once()
+        self.assertIsNone(self.gui.keyboard_hook)
+
+    def test_restarting_hook_does_not_reactivate_previous_callback(self):
+        _, old_hotkey = self.start_fake_hook()
+        old_hotkey()
+        self.gui._toggle_keyboard_hook()
+        _, new_hotkey = self.start_fake_hook()
+        self.gui._toggle_auto_move = Mock()
+        old_hotkey()
+        new_hotkey()
+        self.flush_ui()
+        self.gui._toggle_auto_move.assert_called_once()
+
+    def test_failed_hook_stop_invalidates_callbacks_and_cancels_motion_before_stop(self):
+        hook, hotkey = self.start_fake_hook()
+        self.gui._toggle_auto_move = Mock()
+
+        def fail_stop():
+            self.assertFalse(self.gui.auto_move_running)
+            hotkey()
+            raise TimeoutError("hook still alive")
+
+        hook.stop.side_effect = fail_stop
+        hotkey()
+        self.gui._toggle_keyboard_hook()
+        hotkey()
+        self.flush_ui()
+        self.gui._toggle_auto_move.assert_not_called()
+        self.assertIs(self.gui.keyboard_hook, hook)
+        self.assertIn("hook still alive", gui_module.messagebox.showerror.call_args.args[1])
+        hook.stop.side_effect = None
+        self.gui._toggle_keyboard_hook()
+        self.assertIsNone(self.gui.keyboard_hook)
+
+    def test_failed_hook_start_invalidates_callbacks_but_retains_cleanup_owner(self):
+        hook = Mock()
+
+        def fail_start():
+            hook.register_hotkey.call_args.args[1]()
+            raise TimeoutError("start timed out")
+
+        hook.start.side_effect = fail_start
+        _, hotkey = self.start_fake_hook(hook)
+        self.gui._toggle_auto_move = Mock()
+        hotkey()
+        self.flush_ui()
+        self.gui._toggle_auto_move.assert_not_called()
+        self.assertIs(self.gui.keyboard_hook, hook)
+        self.gui._toggle_keyboard_hook()
+        hook.stop.assert_called_once()
+
+    def test_rapid_labels_explain_submission_counts_and_theoretical_duration(self):
+        self.gui.notebook = Mock()
+        self.gui.default_font = ("font", 10)
+        for name in ("test_key_var", "press_time_var", "interval_time_var", "duration_var"):
+            setattr(self.gui, name, Mock())
+        with patch.object(gui_module, "ttk") as widgets:
+            self.gui.create_rapid_test_tab()
+        labels = "\n".join(call.kwargs.get("text", "") for call in widgets.Label.call_args_list)
+        for text in ("理论周期", "折算", "非硬截止", "任务完成重复数", "提交侧", "接收未验证"):
+            self.assertIn(text, labels)
+        self.gui.press_count_label = Mock()
+        self.gui.click_rate_label = Mock()
+        self.gui._update_press_count(123)
+        self.gui._update_status(2, 61.5)
+        self.assertIn("任务完成重复数: 123", self.gui.press_count_label.config.call_args.kwargs["text"])
+        self.assertIn("提交侧", self.gui.click_rate_label.config.call_args.kwargs["text"])
+
+    def test_gui_integer_milliseconds_reach_native_task_unchanged(self):
+        self.gui.rapid_test_running = False
+        for name, value in (("test_key_var", "a"), ("press_time_var", "2007"),
+                            ("interval_time_var", "2015"), ("duration_var", "8")):
+            variable = Mock()
+            variable.get.return_value = value
+            setattr(self.gui, name, variable)
+        self.gui._toggle_rapid_test()
+        self.assertEqual(self.native.submissions[0][:2],
+                         ([(1, 65, 0, 2007), (2, 65, 0, 2015)], 2))
+
     def test_fixed_text_has_shift_inside_task_and_only_preparation_wait(self):
         self.gui._test_input()
         self.assertEqual(len(self.native.submissions), 1)
@@ -220,7 +324,7 @@ class GuiTaskTests(unittest.TestCase):
 
     def test_uncertain_result_never_displays_completed(self):
         self.native.task_result.resultFlags = 2
-        self.gui._run_rapid_test("a", .001, .001, 1)
+        self.gui._run_rapid_test("a", .001, .001, 1, InputCancellation())
         self.flush_ui()
         self.gui.rapid_test_status.config.assert_called_with(text="状态: 出错，请卸载重试清理")
         self.native.ReleaseInputTask.assert_not_called()
@@ -309,14 +413,14 @@ class GuiTaskTests(unittest.TestCase):
             return 1
 
         self.native.WaitInputTask.side_effect = wait
-        self.gui._run_rapid_test("A", .001, .001, 1)
+        self.gui._run_rapid_test("A", .001, .001, 1, InputCancellation())
         self.assertEqual(self.native.submissions[0][1], 500)
         self.gui.input_workers.wait.assert_not_called()
         self.native.KeyDown.assert_not_called()
         self.flush_ui()
         self.assertEqual(self.gui.press_count, 500)
         self.assertEqual([entry.kwargs["text"] for entry in self.gui.press_count_label.config.call_args_list],
-                         ["按键次数: 123", "按键次数: 500"])
+                         ["任务完成重复数: 500"])
         self.gui.rapid_test_status.config.assert_called_with(text="状态: 任务完成")
 
     def test_ui_stop_stays_pending_until_native_result(self):
@@ -350,6 +454,7 @@ class GuiTaskTests(unittest.TestCase):
         self.gui._toggle_rapid_test()
         self.assertFalse(self.gui.rapid_test_running)
         self.assertFalse(self.gui._rapid_test_pending)
+        self.assertIsNone(self.gui._rapid_cancellation)
         self.gui.rapid_test_status.config.assert_called_with(text="状态: 未启动")
         self.native.SubmitInputTask.assert_not_called()
 
@@ -362,11 +467,12 @@ class GuiTaskTests(unittest.TestCase):
         self.gui._toggle_auto_move()
         self.assertFalse(self.gui.auto_move_running)
         self.assertFalse(self.gui._auto_move_pending)
+        self.assertIsNone(self.gui._auto_move_cancellation)
         self.gui.auto_move_status.config.assert_called_with(text="状态: 未启动")
         self.native.SubmitInputTask.assert_not_called()
 
     def test_auto_move_is_closed_finite_native_trajectory(self):
-        self.gui._run_auto_move(10, 100)
+        self.gui._run_auto_move(10, 100, InputCancellation())
         steps, repeats, _ = self.native.submissions[0]
         self.assertEqual(repeats, 65535)
         self.assertEqual(sum(step[1] for step in steps), 0)
@@ -377,7 +483,7 @@ class GuiTaskTests(unittest.TestCase):
     def test_auto_move_failure_does_not_retry_or_requeue_input(self):
         self.native.task_result.state = FAILED
         self.native.task_result.error = 29
-        self.gui._run_auto_move(10, 100)
+        self.gui._run_auto_move(10, 100, InputCancellation())
         self.flush_ui()
         self.assertEqual(len(self.native.submissions), 1)
         self.gui.auto_move_status.config.assert_called_with(text="状态: 出错，请卸载重试清理")
@@ -403,6 +509,7 @@ class GuiTaskTests(unittest.TestCase):
         manager = DriverManager.__new__(DriverManager)
         manager.driver, manager.tasks = self.native, self.gui.input_tester.tasks
         manager._lock = threading.RLock()
+        manager._remove_package = False
         self.gui.driver_mgr = manager
         self.native.UnloadNTDriver.return_value = 1
 

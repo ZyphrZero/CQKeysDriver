@@ -5,10 +5,11 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
 import queue
+from collections import deque
 from input_workers import InputWorkers, WorkCancelled
-from driver_manager import DriverManager
+from driver_manager import DriverManager, configured_inf_path
 from input_tester import InputTester
-from input_tasks import MOVE_RELATIVE, MOVE_ABSOLUTE, MAX_ACTIONS, MAX_REPEATS, action
+from input_tasks import MOVE_RELATIVE, MOVE_ABSOLUTE, MAX_ACTIONS, MAX_REPEATS, InputCancellation, action
 from virtuakeys_mapping import VirtualKeys
 import logging
 import os
@@ -35,6 +36,74 @@ SW_SHOWNORMAL = 1
 SW_MINIMIZE = 6
 SW_MAXIMIZE = 3
 
+
+class TextHandler(logging.Handler):
+    """Bounded log snapshots; Tk work is performed only by drain()."""
+
+    QUEUE_LIMIT = 256
+    ERROR_LIMIT = 64
+    MESSAGE_CHARS = 2048
+    DISPLAY_LINES = 1000
+    DISPLAY_CHARS = 64000
+    DRAIN_LIMIT = 40
+
+    def __init__(self, text_widget, gui):
+        super().__init__()
+        self.text_widget = text_widget
+        self.gui = gui
+        self._pending = deque()
+        self._errors = deque()
+        self._pending_lock = threading.Lock()
+        self.dropped_logs = 0
+        self.dropped_errors = 0
+        self.truncated_logs = 0
+        self._reported_counts = (0, 0, 0)
+
+    def emit(self, record):
+        if self.gui._ui_closed:
+            return
+        message = self.format(record) + '\n'
+        truncated = len(message) > self.MESSAGE_CHARS
+        if truncated:
+            marker = '\n…[日志截断]…\n'
+            remaining = self.MESSAGE_CHARS - len(marker)
+            message = message[:remaining // 2] + marker + message[-(remaining - remaining // 2):]
+        with self._pending_lock:
+            self.truncated_logs += int(truncated)
+            important = record.levelno >= logging.ERROR
+            pending = self._errors if important else self._pending
+            limit = self.ERROR_LIMIT if important else self.QUEUE_LIMIT
+            if len(pending) >= limit:
+                pending.popleft()
+                if important:
+                    self.dropped_errors += 1
+                else:
+                    self.dropped_logs += 1
+            pending.append(message)
+
+    def drain(self):
+        messages = []
+        with self._pending_lock:
+            counts = (self.dropped_logs, self.dropped_errors, self.truncated_logs)
+            for pending in (self._errors, self._pending):
+                while pending and len(messages) < self.DRAIN_LIMIT:
+                    messages.append(pending.popleft())
+            if counts != self._reported_counts:
+                self._reported_counts = counts
+                messages.append(f"[日志缓冲溢出累计: 普通 {counts[0]} 条，错误 {counts[1]} 条；"
+                                f"超长截断 {counts[2]} 条。仅保留近期详情。]\n")
+        if not messages:
+            return
+        self.text_widget.insert(tk.END, ''.join(messages))
+        extra_lines = int(self.text_widget.index('end-1c').split('.')[0]) - 1 - self.DISPLAY_LINES
+        if extra_lines > 0:
+            self.text_widget.delete('1.0', f'{extra_lines + 1}.0')
+        character_count = self.text_widget.count('1.0', 'end-1c', 'chars')[0]
+        if character_count > self.DISPLAY_CHARS:
+            self.text_widget.delete('1.0', f'1.0+{character_count - self.DISPLAY_CHARS}c')
+        self.text_widget.yview_moveto(1.0)
+
+
 class CQKeysGUI:
     def __init__(self):
         """初始化GUI"""
@@ -54,23 +123,24 @@ class CQKeysGUI:
         self.is_driver_loaded = False
         self.is_closing = False
         self.is_unloading = False
+        self._remove_package_requested = False
         self.input_workers = InputWorkers()
         self._rapid_test_pending = False
         self._auto_move_pending = False
+        self._rapid_cancellation = None
+        self._auto_move_cancellation = None
         self.rapid_test_running = False
         self._stop_results = queue.Queue()
         self._cleanup_results = queue.Queue()
         self._input_release_error = None
         self._management_cleanup_error = None
-        self._ui_events = queue.Queue()
-        self._ui_generation = 0
-        self._ui_closed = False
-        self._log_handler = None
+        self._init_ui_events()
         self.config_file = "driver_config.json"
         
         # 路径配置变量（在创建根窗口后创建）
         self.dll_path_var = tk.StringVar()
-        self.sys_path_var = tk.StringVar()
+        self.inf_path_var = tk.StringVar()
+        self.remove_package_var = tk.BooleanVar(value=False)
         
         # 测试相关变量
         self.test_key_var = tk.StringVar(value="a")
@@ -80,6 +150,8 @@ class CQKeysGUI:
         
         # 自动移动相关变量
         self.keyboard_hook = None
+        self._hook_generation = 0
+        self._hook_enabled = False
         self.auto_move_running = False
         self.auto_move_config = {
             'hotkey': 'F8',
@@ -127,8 +199,8 @@ class CQKeysGUI:
         self.load_auto_move_config()
         
         # 如果没有配置路径，显示提示消息
-        if not self.dll_path_var.get() or not self.sys_path_var.get():
-            logging.warning("请先在驱动路径配置中设置DLL和SYS文件路径")
+        if not self.dll_path_var.get() or not self.inf_path_var.get():
+            logging.warning("请先设置 DLL 和 INF 路径，并准备完整的 INF/SYS/CAT 驱动包")
         
         # 创建功能标签页
         self.create_driver_tab()
@@ -154,6 +226,9 @@ class CQKeysGUI:
         
         self.unload_btn = ttk.Button(driver_frame, text="卸载驱动", command=self._unload_driver, state=tk.DISABLED)
         self.unload_btn.pack(side=tk.LEFT, padx=5)
+
+        ttk.Checkbutton(driver_tab, text="卸载时删除 Driver Store 包（测试用）",
+                        variable=self.remove_package_var).pack(anchor="w", padx=10, pady=5)
         
         # 状态检查区域
         status_frame = ttk.LabelFrame(driver_tab, text="驱动状态", padding="5")
@@ -287,9 +362,13 @@ class CQKeysGUI:
         duration_frame = ttk.LabelFrame(right_settings, text="运行设置", padding="5")
         duration_frame.pack(fill=tk.X, pady=(0,5))
         
-        ttk.Label(duration_frame, text="运行时长(秒):").pack(side=tk.LEFT, padx=5)
-        self.duration_entry = ttk.Entry(duration_frame, textvariable=self.duration_var, width=8, font=self.default_font)
+        duration_input = ttk.Frame(duration_frame)
+        duration_input.pack(fill=tk.X)
+        ttk.Label(duration_input, text="运行时长(秒):").pack(side=tk.LEFT, padx=5)
+        self.duration_entry = ttk.Entry(duration_input, textvariable=self.duration_var, width=8, font=self.default_font)
         self.duration_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Label(duration_frame, text="按理论周期折算重复次数，非硬截止",
+                  wraplength=250).pack(fill=tk.X, padx=5, pady=2)
 
         # 状态显示框架
         status_frame = ttk.LabelFrame(right_settings, text="运行状态", padding="5")
@@ -311,11 +390,12 @@ class CQKeysGUI:
         
         # 右列 - 按键次数和频率
         self.press_count = 0
-        self.press_count_label = ttk.Label(status_right, text="按键次数: 0")
+        self.press_count_label = ttk.Label(status_right, text="任务完成重复数: 0")
         self.press_count_label.pack(fill=tk.X, pady=2)
         
-        self.click_rate_label = ttk.Label(status_right, text="平均频率: 0次/秒")
+        self.click_rate_label = ttk.Label(status_right, text="提交侧平均频率: 0次/秒")
         self.click_rate_label.pack(fill=tk.X, pady=2)
+        ttk.Label(status_right, text="目标应用接收未验证").pack(fill=tk.X, pady=2)
 
         # 控制按钮 - 垂直布局
         control_frame = ttk.Frame(main_container)
@@ -551,11 +631,43 @@ class CQKeysGUI:
             return None
         return self.input_workers.start(target, args)
 
+    def _init_ui_events(self):
+        self._ui_events = queue.Queue()
+        self._ui_generation = 0
+        self._ui_closed = False
+        self._log_handler = None
+        self._progress_lock = threading.Lock()
+        self._rapid_progress = None
+        self._hotkey_lock = threading.Lock()
+        self._pending_hotkey = None
+        self._hotkey_coalesced = 0
+        self._hotkey_reported = 0
+
     def _post_ui(self, callback, *args, **kwargs):
         if not self._ui_closed:
-            self._ui_events.put((self._ui_generation, callback, args, kwargs))
+            self._ui_events.put_nowait((self._ui_generation, callback, args, kwargs))
+
+    def _post_rapid_progress(self, count, elapsed):
+        with self._progress_lock:
+            if not self._ui_closed:
+                self._rapid_progress = (self._ui_generation, count, elapsed)
+
+    def _drain_rapid_progress(self):
+        with self._progress_lock:
+            progress, self._rapid_progress = self._rapid_progress, None
+        if progress is not None:
+            generation, count, elapsed = progress
+            if generation == self._ui_generation:
+                self._update_press_count(count)
+                self._update_status(elapsed, count / elapsed if elapsed else 0)
 
     def _drain_ui_events(self):
+        if self._ui_closed:
+            return
+        try:
+            self._drain_rapid_progress()
+        except Exception:
+            self.root.report_callback_exception(*sys.exc_info())
         for _ in range(100):
             if self._ui_closed:
                 return
@@ -569,26 +681,19 @@ class CQKeysGUI:
                 except Exception:
                     self.root.report_callback_exception(*sys.exc_info())
         if not self._ui_closed:
+            try:
+                self._drain_hotkey()
+            except Exception:
+                self.root.report_callback_exception(*sys.exc_info())
+            if self._log_handler is not None:
+                try:
+                    self._log_handler.drain()
+                except Exception:
+                    self.root.report_callback_exception(*sys.exc_info())
             self.root.after(25, self._drain_ui_events)
 
     def _setup_logging(self):
         """设置日志处理"""
-        class TextHandler(logging.Handler):
-            def __init__(self, text_widget, gui):
-                logging.Handler.__init__(self)
-                self.text_widget = text_widget
-                self.gui = gui
-                
-            def emit(self, record):
-                if not self.gui.is_closing:  # 只在程序未关闭时输出日志
-                    msg = self.format(record) + '\n'
-                    self.gui._post_ui(self._insert_log, msg)
-            
-            def _insert_log(self, msg):
-                """在主线程中插入日志并滚动"""
-                self.text_widget.insert(tk.END, msg)
-                self.text_widget.yview_moveto(1.0)  # 确保滚动到底部
-        
         # 创建日志区域（放在右侧面板）
         self.log_frame = ttk.LabelFrame(self.right_panel, text="日志输出")
         self.log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -637,7 +742,7 @@ class CQKeysGUI:
         try:
             self.input_workers.reset()
             manager = DriverManager()
-            manager._setup_paths(dll_path=self.dll_path_var.get(), sys_path=self.sys_path_var.get())
+            manager._setup_paths(dll_path=self.dll_path_var.get(), inf_path=self.inf_path_var.get())
             self.driver_mgr = manager
             self._input_release_error = None
             self._management_cleanup_error = None
@@ -659,6 +764,21 @@ class CQKeysGUI:
             return False
 
     def _unload_driver(self):
+        if self.is_unloading or self.driver_mgr is None:
+            return
+        if self.remove_package_var.get():
+            try:
+                self.driver_mgr.require_package_removal()
+            except Exception as error:
+                logging.error("无法删除 Driver Store 包: %s", error)
+                messagebox.showerror("无法删除 Driver Store 包", str(error))
+                return
+            if not messagebox.askyesno("删除 Driver Store 驱动包",
+                                       "将移除设备，并删除本次暂存及设备绑定的驱动包。\n"
+                                       "不强制删除其他设备使用的包，不清扫所有历史版本。\n"
+                                       "下次安装需要完整且正确签名的 INF/SYS/CAT。继续？", default="no"):
+                return
+            self._remove_package_requested = True
         self._begin_unload()
 
     def _begin_unload(self, close_after=False):
@@ -666,6 +786,7 @@ class CQKeysGUI:
             return
         self.is_unloading = True
         self.is_closing = close_after
+        self._invalidate_hook()
         self.auto_move_running = False
         self.rapid_test_running = False
         self.input_workers.cancel()
@@ -718,7 +839,7 @@ class CQKeysGUI:
                     self.keyboard_hook.stop()
                     self.keyboard_hook = None
                 if self.driver_mgr:
-                    self.driver_mgr.cleanup()
+                    self.driver_mgr.cleanup(remove_package=self._remove_package_requested)
                 self._cleanup_results.put(None)
             except Exception as error:
                 self._cleanup_results.put(error)
@@ -754,8 +875,11 @@ class CQKeysGUI:
             return
         self.driver_mgr = None
         self.input_tester = None
+        self._remove_package_requested = False
         self._rapid_test_pending = False
         self._auto_move_pending = False
+        self._rapid_cancellation = None
+        self._auto_move_cancellation = None
         self._ui_generation += 1
         self._update_button_states(False)
         self.driver_status.config(text="驱动状态: 未加载")
@@ -1023,45 +1147,48 @@ class CQKeysGUI:
         self.dll_path_entry.grid(row=0, column=1, padx=5)
         ttk.Button(path_frame, text="浏览", command=lambda: self.browse_file("dll")).grid(row=0, column=2)
         
-        # SYS路径配置
-        ttk.Label(path_frame, text="SYS路径:").grid(row=1, column=0, sticky="w")
+        # INF路径配置
+        ttk.Label(path_frame, text="驱动包 INF:").grid(row=1, column=0, sticky="w")
         # 使用已经在__init__中创建的StringVar
-        self.sys_path_entry = ttk.Entry(path_frame, textvariable=self.sys_path_var, width=30, font=self.default_font)
-        self.sys_path_entry.grid(row=1, column=1, padx=5)
-        ttk.Button(path_frame, text="浏览", command=lambda: self.browse_file("sys")).grid(row=1, column=2)
+        self.inf_path_entry = ttk.Entry(path_frame, textvariable=self.inf_path_var, width=30, font=self.default_font)
+        self.inf_path_entry.grid(row=1, column=1, padx=5)
+        ttk.Button(path_frame, text="浏览", command=lambda: self.browse_file("inf")).grid(row=1, column=2)
+        ttk.Label(path_frame, text="选择 cqkeys.inf；同目录必须包含匹配的 cqkeys.sys 和 cqkeys.cat。\n"
+                  "文件齐备不代表签名受信任或安装成功。", wraplength=360).grid(
+                      row=2, column=0, columnspan=3, sticky="w", pady=5)
         
         # 保存配置按钮
-        ttk.Button(path_frame, text="保存配置", command=self.save_path_config).grid(row=2, column=1, pady=5)
+        ttk.Button(path_frame, text="保存配置", command=self.save_path_config).grid(row=3, column=1, pady=5)
     
     def browse_file(self, file_type):
         """浏览文件对话框
         
         Args:
-            file_type (str): 文件类型，"dll" 或 "sys"
+            file_type (str): 文件类型，"dll" 或 "inf"
         """
-        filetypes = [("DLL files", "*.dll")] if file_type == "dll" else [("SYS files", "*.sys")]
+        filetypes = [("DLL files", "*.dll")] if file_type == "dll" else [("CQKeys driver INF", "cqkeys.inf")]
         filename = filedialog.askopenfilename(filetypes=filetypes)
         if filename:
             if file_type == "dll":
                 self.dll_path_var.set(filename)
             else:
-                self.sys_path_var.set(filename)
+                self.inf_path_var.set(filename)
     
     def save_path_config(self):
         """保存路径配置到文件"""
         # 获取当前路径设置
         dll_path = self.dll_path_var.get().strip()
-        sys_path = self.sys_path_var.get().strip()
+        inf_path = self.inf_path_var.get().strip()
         
         # 验证路径
-        if not dll_path or not sys_path:
-            logging.error("DLL路径和SYS路径不能为空")
+        if not dll_path or not inf_path:
+            logging.error("DLL路径和INF路径不能为空")
             return
             
         config = {
             # 驱动路径配置
             "dll_path": dll_path,
-            "sys_path": sys_path,
+            "inf_path": inf_path,
             
             # 高频按键测试配置
             "rapid_test": {
@@ -1096,6 +1223,8 @@ class CQKeysGUI:
                 config[key] = {**section, **value}
             else:
                 config[key] = value
+        if "inf_path" in updates:
+            config.pop("sys_path", None)
 
         temporary_path = None
         try:
@@ -1119,14 +1248,14 @@ class CQKeysGUI:
                     
                 # 加载驱动路径配置
                 dll_path = config.get("dll_path", "")
-                sys_path = config.get("sys_path", "")
+                inf_path = configured_inf_path(config)
                 
                 # 设置路径变量
                 if dll_path:
                     self.dll_path_var.set(dll_path)
                     
-                if sys_path:
-                    self.sys_path_var.set(sys_path)
+                if inf_path:
+                    self.inf_path_var.set(inf_path)
                 
                 # 加载高频按键测试配置
                 rapid_test_config = config.get("rapid_test", {})
@@ -1155,10 +1284,8 @@ class CQKeysGUI:
         """切换高频按键测试状态"""
         if self.is_unloading or self.is_closing:
             return
-        if self._rapid_test_pending:
-            self.rapid_test_running = False
-            self.rapid_test_btn.config(state=tk.DISABLED)
-            self.rapid_test_status.config(text="状态: 正在取消，等待原生结果")
+        if self._rapid_test_pending or self._rapid_cancellation is not None:
+            self._request_rapid_stop()
             return
         if not self.rapid_test_running:
             # 开始测试
@@ -1198,66 +1325,86 @@ class CQKeysGUI:
                 self.press_count = 0
                 self._update_press_count()
                 self.run_time_label.config(text="运行时间: 0秒")
-                self.click_rate_label.config(text="平均频率: 0次/秒")
+                self.click_rate_label.config(text="提交侧平均频率: 0次/秒")
                 
                 # 更新UI状态
                 self.rapid_test_btn.config(text="停止测试")
                 self.rapid_test_status.config(text="状态: 运行中")
                 self.rapid_test_running = True
                 self._rapid_test_pending = True
+                self._rapid_cancellation = InputCancellation()
                 
                 # 启动测试线程
                 self.rapid_test_thread = self._start_worker(
                     self._run_rapid_test,
-                    (test_key, press_time/1000.0, interval_time/1000.0, duration))
+                    (test_key, press_time/1000.0, interval_time/1000.0, duration, self._rapid_cancellation))
                 
             except Exception as error:
                 self._stop_test("状态: 未启动")
                 messagebox.showerror("错误", str(error))
                 return
     
-    def _run_rapid_test(self, key, press_time, interval_time, duration):
+    def _request_rapid_stop(self):
+        self.rapid_test_running = False
+        try:
+            if self._rapid_cancellation is not None:
+                self._rapid_cancellation.cancel()
+        except Exception as error:
+            self.rapid_test_status.config(text="状态: 取消失败，可重试或卸载")
+            self.rapid_test_btn.config(state=tk.NORMAL)
+            logging.error("高频任务取消失败: %s", error)
+            messagebox.showerror("取消失败", str(error))
+            return
+        self.rapid_test_btn.config(state=tk.DISABLED if self._rapid_test_pending else tk.NORMAL)
+        self.rapid_test_status.config(text="状态: 正在取消，等待原生结果" if self._rapid_test_pending
+                                      else "状态: 取消已请求，请卸载重试清理")
+
+    def _run_rapid_test(self, key, press_time, interval_time, duration, cancellation):
         """Submit one finite repeat task; polling only updates the UI."""
         start_time = time.monotonic()
 
         def progress(result):
             elapsed = time.monotonic() - start_time
-            self._post_ui(self._update_press_count, result.completedRepeats)
-            self._post_ui(self._update_status, elapsed,
-                          result.completedRepeats / elapsed if elapsed else 0)
+            self._post_rapid_progress(result.completedRepeats, elapsed)
 
         status = "状态: 任务完成"
+        failed = False
         try:
             if not self.input_tester:
                 raise RuntimeError("输入测试器未初始化")
             self.input_tester.repeat_key(key, press_time, interval_time, duration,
                                          cancelled=lambda: not self.rapid_test_running,
-                                         progress=progress)
+                                         progress=progress, cancellation=cancellation)
         except WorkCancelled:
             status = "状态: 已取消"
         except Exception as error:
+            failed = True
             status = "状态: 出错，请卸载重试清理"
             error_msg = f"高频按键测试出错: {error}"
             logging.error(error_msg)
             self._post_ui(messagebox.showerror, "错误", error_msg)
         finally:
-            self._post_ui(self._stop_test, status)
+            self._post_ui(self._stop_test, status, failed=failed)
     
     def _update_status(self, elapsed_time, rate):
         """更新状态显示
         
         Args:
             elapsed_time (float): 运行时间（秒）
-            rate (float): 点击频率（次/秒）
+            rate (float): 提交侧完成重复数/秒，不代表目标应用接收频率
         """
         self.run_time_label.config(text=f"运行时间: {round(elapsed_time, 1)}秒")
-        self.click_rate_label.config(text=f"平均频率: {rate:.1f}次/秒")
+        self.click_rate_label.config(text=f"提交侧平均频率: {rate:.1f}次/秒")
     
-    def _stop_test(self, status="状态: 任务完成"):
+    def _stop_test(self, status="状态: 任务完成", failed=False):
         """停止测试"""
+        self._drain_rapid_progress()
         self.rapid_test_running = False
         self._rapid_test_pending = False
-        self.rapid_test_btn.config(text="开始测试", state=tk.NORMAL if self.is_driver_loaded
+        if not failed:
+            self._rapid_cancellation = None
+        self.rapid_test_btn.config(text="重试取消（需卸载）" if failed else "开始测试",
+                                   state=tk.NORMAL if self.is_driver_loaded
                                    and not self.is_unloading else tk.DISABLED)
         self.rapid_test_status.config(text=status)
     
@@ -1265,7 +1412,7 @@ class CQKeysGUI:
         """更新按键计数显示"""
         if count is not None:
             self.press_count = count
-        self.press_count_label.config(text=f"按键次数: {self.press_count}")
+        self.press_count_label.config(text=f"任务完成重复数: {self.press_count}")
     
     def check_privileges(self):
         """检查权限并在需要时请求提升
@@ -1629,11 +1776,43 @@ class CQKeysGUI:
         # 在新线程中运行测试
         self._start_worker(run_test)
 
+    def _invalidate_hook(self):
+        with self._hotkey_lock:
+            self._hook_enabled = False
+            self._hook_generation += 1
+            self._pending_hotkey = None
+
+    def _queue_hotkey(self, generation):
+        with self._hotkey_lock:
+            if self._ui_closed or not self._hook_enabled or generation != self._hook_generation:
+                return
+            if self._pending_hotkey is not None:
+                self._hotkey_coalesced += 1
+            else:
+                self._pending_hotkey = generation
+
+    def _drain_hotkey(self):
+        with self._hotkey_lock:
+            generation, self._pending_hotkey = self._pending_hotkey, None
+            total = self._hotkey_coalesced
+            coalesced = total - self._hotkey_reported
+            self._hotkey_reported = total
+        if coalesced:
+            logging.warning("热键过载: 本轮合并 %s 次通知，累计合并 %s 次；每轮最多执行一次切换",
+                            coalesced, total)
+        if generation is not None:
+            self._dispatch_hotkey(generation)
+
+    def _dispatch_hotkey(self, generation):
+        if (self._hook_enabled and generation == self._hook_generation
+                and self.keyboard_hook is not None and not self.is_unloading and not self.is_closing):
+            self._toggle_auto_move()
+
     def _toggle_keyboard_hook(self):
         """切换键盘钩子状态"""
         if self.is_unloading or self.is_closing:
             return
-        if not self.keyboard_hook:
+        if not self.keyboard_hook and self._auto_move_cancellation is None:
             try:
                 # 注册热键回调
                 hotkey = self.hotkey_var.get().upper()
@@ -1642,34 +1821,58 @@ class CQKeysGUI:
                     messagebox.showerror("错误", f"无效的热键: {hotkey}")
                     return
                     
+                self._invalidate_hook()
+                generation = self._hook_generation
                 self.keyboard_hook = KeyboardHook()
-                self.keyboard_hook.register_hotkey(vk_code, lambda: self._post_ui(self._toggle_auto_move))
+                self.keyboard_hook.register_hotkey(vk_code, lambda: self._queue_hotkey(generation))
                 self.keyboard_hook.start()
+                with self._hotkey_lock:
+                    self._hook_enabled = True
                 
                 # 更新UI
                 self.start_hook_btn.config(text="停止热键监听")
                 self.auto_move_status.config(text="状态: 等待热键触发")
                 
             except Exception as e:
+                self._invalidate_hook()
                 messagebox.showerror("错误", f"启动键盘钩子失败: {str(e)}")
                 # Retain the object until stop() confirms its native thread exited.
                 self.start_hook_btn.config(text="停止热键监听" if self.keyboard_hook else "启动热键监听")
                 
         else:
+            self._invalidate_hook()
+            cancelled = self._request_auto_move_stop()
             try:
                 # 停止键盘钩子
-                self.keyboard_hook.stop()
-                self.keyboard_hook = None
-                
-                # 确保自动移动也停止
-                self.auto_move_running = False
+                if self.keyboard_hook is not None:
+                    self.keyboard_hook.stop()
+                    self.keyboard_hook = None
                 
                 # 更新UI
-                self.start_hook_btn.config(text="启动热键监听")
-                self.auto_move_status.config(text="状态: 正在取消" if self._auto_move_pending else "状态: 未启动")
+                self.start_hook_btn.config(text="启动热键监听" if self._auto_move_cancellation is None
+                                           else "重试取消自动移动")
+                if cancelled and self._auto_move_cancellation is None and not self._auto_move_pending:
+                    self.auto_move_status.config(text="状态: 未启动")
                 
             except Exception as e:
+                self.start_hook_btn.config(text="重试停止热键监听")
+                self.auto_move_status.config(text="状态: 热键停止失败，监听已禁用" if cancelled
+                                             else "状态: 热键停止及任务取消失败，请重试或卸载")
                 messagebox.showerror("错误", f"停止键盘钩子失败: {str(e)}")
+
+    def _request_auto_move_stop(self):
+        self.auto_move_running = False
+        try:
+            if self._auto_move_cancellation is not None:
+                self._auto_move_cancellation.cancel()
+        except Exception as error:
+            self.auto_move_status.config(text="状态: 取消失败，可重试或卸载")
+            logging.error("自动移动取消失败: %s", error)
+            messagebox.showerror("取消失败", str(error))
+            return False
+        self.auto_move_status.config(text="状态: 正在取消，等待原生结果" if self._auto_move_pending
+                                     else "状态: 取消已请求，请卸载重试清理")
+        return True
 
     def _toggle_auto_move(self):
         """切换自动移动状态"""
@@ -1678,9 +1881,8 @@ class CQKeysGUI:
         if not self.is_driver_loaded or not self.input_tester:
             messagebox.showerror("错误", "请先加载驱动")
             return
-        if self._auto_move_pending:
-            self.auto_move_running = False
-            self.auto_move_status.config(text="状态: 正在取消，等待原生结果")
+        if self._auto_move_pending or self._auto_move_cancellation is not None:
+            self._request_auto_move_stop()
             return
             
         if not self.auto_move_running:
@@ -1694,10 +1896,11 @@ class CQKeysGUI:
                 # 启动自动移动
                 self.auto_move_running = True
                 self._auto_move_pending = True
+                self._auto_move_cancellation = InputCancellation()
                 self.auto_move_status.config(text=f"状态: 自动移动中（最多{MAX_REPEATS}圈）")
                 
                 # 在新线程中运行自动移动
-                self._start_worker(self._run_auto_move, (speed, move_range))
+                self._start_worker(self._run_auto_move, (speed, move_range, self._auto_move_cancellation))
                 
             except Exception as error:
                 self._finish_auto_move("状态: 未启动")
@@ -1725,23 +1928,32 @@ class CQKeysGUI:
             raise ValueError("轨迹没有有效位移；请调整移动范围或速度")
         return steps
 
-    def _run_auto_move(self, speed, move_range):
+    def _run_auto_move(self, speed, move_range, cancellation):
         status = "状态: 任务完成"
+        failed = False
         try:
             self.input_tester.run_actions(self._auto_move_actions(speed, move_range),
                                           repeats=MAX_REPEATS,
-                                          cancelled=lambda: not self.auto_move_running)
+                                          cancelled=lambda: not self.auto_move_running,
+                                          cancellation=cancellation)
         except WorkCancelled:
             status = "状态: 已取消，等待热键触发"
         except Exception as error:
+            failed = True
             status = "状态: 出错，请卸载重试清理"
             logging.error("自动移动失败: %s", error)
         finally:
-            self._post_ui(self._finish_auto_move, status)
+            self._post_ui(self._finish_auto_move, status, failed=failed)
 
-    def _finish_auto_move(self, status):
+    def _finish_auto_move(self, status, failed=False):
         self.auto_move_running = False
         self._auto_move_pending = False
+        if not failed:
+            self._auto_move_cancellation = None
+        if status == "状态: 已取消，等待热键触发" and not self._hook_enabled:
+            status = "状态: 已取消，热键未启动"
+        if self.keyboard_hook is None:
+            self.start_hook_btn.config(text="重试取消自动移动" if failed else "启动热键监听")
         self.auto_move_status.config(text=status)
 
     def save_auto_move_config(self):

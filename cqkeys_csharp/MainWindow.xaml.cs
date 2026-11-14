@@ -15,10 +15,13 @@ namespace CqKeys
         private CancellationTokenSource testCancellation;
         private bool observingInput;
         private int observedKeyDown, observedKeyUp, observedMouseMoves;
+        private const int MaxLogCharacters = 65536;
+        private const string LogTrimmedNotice = "[较早日志已裁剪，仅保留最近内容]\n";
 
         public MainWindow(DriverService driverService)
         {
             InitializeComponent();
+            LogTextBox.IsUndoEnabled = false;
             _driverService = driverService ?? throw new ArgumentNullException(nameof(driverService));
             _driverService.StatusChanged += DriverService_StatusChanged;
             
@@ -34,7 +37,14 @@ namespace CqKeys
             // 确保在UI线程上更新界面
             Dispatcher.Invoke(() =>
             {
-                LogTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\n");
+                if (message != null && message.Length > MaxLogCharacters / 2)
+                    message = "[单条日志过长，已截断]" + message.Substring(message.Length - MaxLogCharacters / 2);
+                string entry = $"[{DateTime.Now:HH:mm:ss}] {message}\n";
+                string text = LogTextBox.Text + entry;
+                if (text.Length > MaxLogCharacters)
+                    LogTextBox.Text = LogTrimmedNotice + text.Substring(text.Length - MaxLogCharacters + LogTrimmedNotice.Length);
+                else
+                    LogTextBox.AppendText(entry);
                 LogTextBox.ScrollToEnd();
                 UpdateButtonStates();
             });
@@ -44,6 +54,7 @@ namespace CqKeys
         {
             InstallButton.IsEnabled = !operationPending && !_driverService.NeedsCleanup;
             UninstallButton.IsEnabled = !operationPending && _driverService.NeedsCleanup;
+            RemovePackageCheckBox.IsEnabled = !operationPending;
             KeyboardTestButton.IsEnabled = MouseTestButton.IsEnabled = !operationPending && _driverService.CanTestInput;
             CancelTestButton.IsEnabled = testCancellation != null && !testCancellation.IsCancellationRequested;
         }
@@ -168,11 +179,17 @@ namespace CqKeys
 
         private async void UninstallButton_Click(object sender, RoutedEventArgs e)
         {
+            if (operationPending || !_driverService.NeedsCleanup) return;
+            bool removePackage = RemovePackageCheckBox.IsChecked == true;
+            if (removePackage && MessageBox.Show(
+                    "将移除设备，并删除本次暂存及设备绑定的驱动包。\n不强制删除其他设备使用的包，不清扫所有历史版本。\n下次安装需要完整且正确签名的 INF/SYS/CAT。继续？",
+                    "删除 Driver Store 驱动包", MessageBoxButton.YesNo, MessageBoxImage.Warning,
+                    MessageBoxResult.No) != MessageBoxResult.Yes) return;
             try
             {
                 operationPending = true;
                 UpdateButtonStates();
-                await _driverService.UninstallDriverAsync();
+                await _driverService.UninstallDriverAsync(removePackage);
             }
             catch (Exception ex)
             {

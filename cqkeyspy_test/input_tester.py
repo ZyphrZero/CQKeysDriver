@@ -84,11 +84,12 @@ class InputTester:
         return [action(BUTTONS, buttons[button], delay_ms=milliseconds(duration)),
                 action(BUTTONS, 0, delay_ms=milliseconds(interval))]
 
-    def run_actions(self, actions, repeats=1, repeat_delay_ms=0, cancelled=None, progress=None):
+    def run_actions(self, actions, repeats=1, repeat_delay_ms=0, cancelled=None, progress=None,
+                    cancellation=None):
         return self.tasks.run(
             actions, repeats, repeat_delay_ms,
             cancelled=lambda: self._stopped.is_set() or (cancelled is not None and cancelled()),
-            progress=progress)
+            progress=progress, cancellation=cancellation)
 
     def press_key(self, key, duration=0.1):
         self.run_actions(self.key_actions(key, duration))
@@ -116,10 +117,11 @@ class InputTester:
             raise ValueError(f"重复次数必须为 1..{MAX_REPEATS}；请缩短运行时长")
         return repeats
 
-    def repeat_key(self, key, hold, interval, duration, cancelled=None, progress=None):
+    def repeat_key(self, key, hold, interval, duration, cancelled=None, progress=None,
+                   cancellation=None):
         repeats = self.repeat_count(duration, hold, interval)
         return self.run_actions(self.key_actions(key, hold, interval), repeats,
-                                cancelled=cancelled, progress=progress)
+                                cancelled=cancelled, progress=progress, cancellation=cancellation)
 
     def key_down(self, key):
         return self._call("KeyDown", self._vk(key))

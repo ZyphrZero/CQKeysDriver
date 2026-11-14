@@ -12,6 +12,7 @@ namespace CqKeys
         private readonly string _driverPath;
         private readonly string _dllPath;
         private bool _isDriverInstalled;
+        private bool _removePackageRequested;
         private bool _disposed;
 
         public event EventHandler<string> StatusChanged;
@@ -76,6 +77,10 @@ namespace CqKeys
                     throw new FileNotFoundException("驱动部署文件不完整，请查看日志中的缺失路径。");
                 }
 
+                OnStatusChanged($"请求加载 DLL: {_dllPath}");
+                var library = DriverManager.InspectNativeLibrary();
+                OnStatusChanged($"实际加载 DLL: {library.Path}");
+                OnStatusChanged("Driver Store 删除接口: " + (library.SupportsPackageRemoval ? "可用" : "不可用"));
                 OnStatusChanged("正在安装驱动...");
                 _isDriverInstalled = await _driverManager.InstallAndStartDriverAsync(_driverName, _driverPath);
                 
@@ -91,7 +96,7 @@ namespace CqKeys
             }
         }
 
-        public async Task UninstallDriverAsync()
+        public async Task UninstallDriverAsync(bool removePackage = false)
         {
             try
             {
@@ -101,13 +106,19 @@ namespace CqKeys
                     return;
                 }
 
-                OnStatusChanged("正在卸载驱动...");
-                bool result = await _driverManager.StopAndUninstallDriverAsync(_driverName);
+                if (removePackage || _removePackageRequested) _driverManager.RequirePackageRemoval();
+                _removePackageRequested |= removePackage;
+                OnStatusChanged(_removePackageRequested ? "正在卸载设备并删除本次相关 Driver Store 包..." : "正在卸载驱动...");
+                bool result = await _driverManager.StopAndUninstallDriverAsync(_driverName, _removePackageRequested);
                 
                 if (result)
                 {
                     _isDriverInstalled = false;
-                    OnStatusChanged("驱动管理会话已清理，Driver Store 驱动包保留。");
+                    bool removedPackage = _removePackageRequested;
+                    _removePackageRequested = false;
+                    OnStatusChanged(removedPackage
+                        ? "驱动管理会话和本次相关 Driver Store 包已清理；未扫描历史包。"
+                        : "驱动管理会话已清理，Driver Store 驱动包保留。");
                 }
             }
             catch (Exception ex)

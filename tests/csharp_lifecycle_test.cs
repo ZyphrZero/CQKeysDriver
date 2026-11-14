@@ -16,13 +16,37 @@ internal static partial class CSharpLifecycleTest
     private static int failures;
     private static int executed;
 
-    private static int Main()
+    private static int Main(string[] arguments)
     {
+        if (arguments.Length != 0)
+        {
+            if (arguments.Length != 2 || arguments[0] != "--inspect-native") return 2;
+            try
+            {
+                var library = ProductionApp::CqKeys.DriverManager.InspectNativeLibrary();
+                Console.WriteLine("Actual DLL: " + library.Path);
+                Console.WriteLine("Package removal export: " + library.SupportsPackageRemoval);
+                Console.WriteLine("Read-only module probe: only ABI metadata queried; no driver operations.");
+                return library.SupportsPackageRemoval == bool.Parse(arguments[1]) ? 0 : 1;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine(error);
+                return 1;
+            }
+        }
         Console.WriteLine("SAFE HARNESS: real App/MainWindow/DriverService source; simulated UI and DriverManager boundaries.");
         Console.WriteLine("Only the production DriverManager static error formatter is reflected; no real windows or Native entry points.");
         Run("cold close is deferred and cannot reenter", ColdCloseIsDeferred);
         Run("close after explicit uninstall is deferred", CloseAfterUninstallIsDeferred);
         Run("uninstall failure preserves retry state", UninstallFailureCanRetry);
+        Run("package removal is opt-in and confirmed", PackageRemovalRequiresConfirmation);
+        Run("package removal failure preserves the choice for retry", PackageRemovalCanRetry);
+        Run("missing package export does not latch a deletion request", MissingPackageExportCanCloseNormally);
+        Run("completed package deletion cannot leak its choice through a logging error", CompletedPackageDeletionClearsIntent);
+        Run("installation logs actual DLL metadata before native installation", NativeMetadataIsLogged);
+        Run("metadata inspection failure blocks installation", NativeMetadataFailureBlocksInstall);
+        Run("closing with a checked option alone preserves packages", CloseDoesNotRequestPackageRemoval);
         Run("dispatcher enqueue failure preserves retry state", EnqueueFailureCanRetry);
         Run("deferred close exception preserves retry state", DeferredCloseFailureCanRetry);
         Run("pending cleanup blocks close and supports failure retry", PendingCleanupCanRetry);
@@ -38,6 +62,7 @@ internal static partial class CSharpLifecycleTest
         Run("revoked startup displays original PnP problem and NTSTATUS", RevokedStartupIsExplicit);
         Run("missing startup diagnostics are not reported as revocation", StartupDiagnosticsPreserveUncertainty);
         RunInputTests();
+        Run("status log stays bounded and retains recent messages", StatusLogIsBounded);
         Console.WriteLine($"{executed - failures}/{executed} passed; simulated boundaries are not WPF or device acceptance tests.");
         return failures == 0 ? 0 : 1;
     }
@@ -46,6 +71,7 @@ internal static partial class CSharpLifecycleTest
     {
         executed++;
         MessageBox.Messages.Clear();
+        MessageBox.NextResult = MessageBoxResult.No;
         DriverManager.DenyConstruction = false;
         DriverManager.LastCreated = null;
         try
@@ -64,6 +90,22 @@ internal static partial class CSharpLifecycleTest
     private static void Check(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private static void StatusLogIsBounded()
+    {
+        var window = new MainWindow(new DriverService());
+        MethodInfo callback = typeof(MainWindow).GetMethod("DriverService_StatusChanged",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        for (int index = 0; index < 100; index++)
+            callback.Invoke(window, new object[] { null, new string('x', 4096) + index });
+        Check(window.LogTextBox.Text.Length <= 65536, "Status log grew beyond its character budget");
+        Check(window.LogTextBox.Text.EndsWith("99\n"), "Recent log was discarded");
+        Check(window.LogTextBox.Text.Contains("较早日志已裁剪"), "Log trimming was not made visible");
+        callback.Invoke(window, new object[] { null, new string('z', 200000) + "latest" });
+        Check(window.LogTextBox.Text.Length <= 65536 && window.LogTextBox.Text.EndsWith("latest\n"),
+            "Oversized single log entry bypassed the budget");
+        Check(!window.LogTextBox.IsUndoEnabled, "Undo history can retain trimmed log text");
     }
 
     private static void CheckQueuedClose(MainWindow window)
@@ -114,6 +156,141 @@ internal static partial class CSharpLifecycleTest
         window.Close();
         CheckQueuedClose(window);
         Check(manager.UninstallCalls == 2, "Retry did not perform cleanup again");
+    }
+
+    private static void ClickUninstall(MainWindow window)
+    {
+        typeof(MainWindow).GetMethod("UninstallButton_Click", BindingFlags.Instance | BindingFlags.NonPublic)
+            .Invoke(window, new object[] { null, new RoutedEventArgs() });
+    }
+
+    private static void PackageRemovalRequiresConfirmation()
+    {
+        var window = new MainWindow(new DriverService());
+        DriverManager manager = DriverManager.LastCreated;
+        manager.NeedsCleanup = true;
+        ClickUninstall(window);
+        Check(manager.UninstallCalls == 1 && !manager.RemovePackageRequested,
+            "ordinary uninstall must retain packages by default");
+        Check(MessageBox.Messages.Count == 0, "ordinary uninstall should not ask about package deletion");
+        manager.NeedsCleanup = true;
+        window.RemovePackageCheckBox.IsChecked = true;
+        ClickUninstall(window);
+        Check(manager.UninstallCalls == 1 && manager.NeedsCleanup, "declining deletion still called uninstall");
+        MessageBox.NextResult = MessageBoxResult.Yes;
+        ClickUninstall(window);
+        Check(manager.UninstallCalls == 2 && manager.RemovePackageRequested, "confirmed selection was not propagated");
+        Check(window.LogTextBox.Text.Contains("相关 Driver Store 包已清理"), "completion did not describe package cleanup");
+    }
+
+    private static void PackageRemovalCanRetry()
+    {
+        var service = new DriverService();
+        var window = new MainWindow(service);
+        DriverManager manager = DriverManager.LastCreated;
+        manager.NeedsCleanup = true;
+        manager.UninstallFailure = new InvalidOperationException("package in use");
+        window.RemovePackageCheckBox.IsChecked = true;
+        MessageBox.NextResult = MessageBoxResult.Yes;
+        ClickUninstall(window);
+        Check(service.NeedsCleanup && manager.RemovePackageRequested && window.UninstallButton.IsEnabled,
+            "package deletion failure lost retry state");
+        Check(!window.LogTextBox.Text.Contains("包已清理"), "failure was reported as deletion success");
+        manager.UninstallFailure = null;
+        window.RemovePackageCheckBox.IsChecked = false;
+        window.Close();
+        Check(manager.UninstallCalls == 2 && manager.RemovePackageRequested, "close silently downgraded pending deletion");
+        CheckQueuedClose(window);
+    }
+
+    private static void CloseDoesNotRequestPackageRemoval()
+    {
+        var window = new MainWindow(new DriverService());
+        DriverManager manager = DriverManager.LastCreated;
+        manager.NeedsCleanup = true;
+        window.RemovePackageCheckBox.IsChecked = true;
+        window.Close();
+        Check(!manager.RemovePackageRequested && MessageBox.Messages.Count == 0,
+            "checking the option alone authorized package removal on close");
+        CheckQueuedClose(window);
+    }
+
+    private static void MissingPackageExportCanCloseNormally()
+    {
+        var window = new MainWindow(new DriverService());
+        DriverManager manager = DriverManager.LastCreated;
+        manager.NeedsCleanup = manager.IsInputReady = true;
+        manager.SupportsPackageRemoval = false;
+        manager.LoadedDllPath = "old-copy/cqkeysdll.dll";
+        window.RemovePackageCheckBox.IsChecked = true;
+        MessageBox.NextResult = MessageBoxResult.Yes;
+        ClickUninstall(window);
+        Check(manager.UninstallCalls == 0 && manager.NeedsCleanup && manager.IsInputReady,
+            "missing export reached uninstall or changed the active session");
+        Check(MessageBox.Messages.Exists(message => message.Contains(manager.LoadedDllPath)),
+            "missing export error did not identify the loaded DLL");
+        window.RemovePackageCheckBox.IsChecked = false;
+        window.Close();
+        Check(manager.UninstallCalls == 1 && !manager.RemovePackageRequested,
+            "unsupported request was retained and prevented ordinary cleanup");
+        CheckQueuedClose(window);
+    }
+
+    private static void NativeMetadataIsLogged()
+    {
+        using (var files = new DeploymentFiles(null))
+        using (var service = new DriverService())
+        {
+            DriverManager manager = DriverManager.LastCreated;
+            manager.SupportsPackageRemoval = false;
+            manager.LoadedDllPath = "actual-loaded/cqkeysdll.dll";
+            var messages = new List<string>();
+            service.StatusChanged += (sender, message) => messages.Add(message);
+            try { service.InitializeDriverAsync().GetAwaiter().GetResult(); }
+            catch (InvalidOperationException) { }
+            Check(manager.InstallCalls == 1, "inspection should not fabricate installation success");
+            Check(messages.Exists(message => message.Contains("请求加载 DLL:")), "requested DLL was not logged");
+            Check(messages.Exists(message => message.Contains("实际加载 DLL: " + manager.LoadedDllPath)), "actual DLL was not logged");
+            Check(messages.Exists(message => message.Contains("删除接口: 不可用")), "missing optional capability was not reported");
+        }
+    }
+
+    private static void CompletedPackageDeletionClearsIntent()
+    {
+        using (var service = new DriverService())
+        {
+            DriverManager manager = DriverManager.LastCreated;
+            manager.NeedsCleanup = true;
+            service.StatusChanged += (sender, message) =>
+            {
+                if (message.Contains("相关 Driver Store 包已清理"))
+                    throw new InvalidOperationException("status observer failed");
+            };
+            Exception observed = null;
+            try { service.UninstallDriverAsync(true).GetAwaiter().GetResult(); }
+            catch (Exception error) { observed = error; }
+            Check(observed != null && observed.Message == "status observer failed" && !manager.NeedsCleanup,
+                "cleanup completion was lost or the observer error was hidden");
+            manager.NeedsCleanup = true;
+            service.UninstallDriverAsync().GetAwaiter().GetResult();
+            Check(!manager.RemovePackageRequested, "completed deletion choice leaked into a later ordinary uninstall");
+        }
+    }
+
+    private static void NativeMetadataFailureBlocksInstall()
+    {
+        using (var files = new DeploymentFiles(null))
+        using (var service = new DriverService())
+        {
+            DriverManager manager = DriverManager.LastCreated;
+            var failure = new InvalidOperationException("module inspection failed");
+            manager.InspectionFailure = failure;
+            Exception observed = null;
+            try { service.InitializeDriverAsync().GetAwaiter().GetResult(); }
+            catch (Exception error) { observed = error; }
+            Check(ReferenceEquals(observed, failure) && manager.InstallCalls == 0,
+                "failed module inspection was hidden by installation");
+        }
     }
 
     private static void EnqueueFailureCanRetry()
